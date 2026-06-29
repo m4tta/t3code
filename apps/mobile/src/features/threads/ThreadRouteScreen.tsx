@@ -671,7 +671,7 @@ function ThreadRouteContent(
               }
             : undefined,
           unstable_headerRightItems:
-            layout.usesSplitView && Platform.OS === "ios" && !activeInspectorRenderer
+            layout.usesSplitView && Platform.OS === "ios"
               ? () => threadRightHeaderItems
               : undefined,
           unstable_navigationItemStyle: usesNativeHeaderGlass ? "editor" : undefined,
