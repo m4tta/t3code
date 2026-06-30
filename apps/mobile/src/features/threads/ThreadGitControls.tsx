@@ -402,7 +402,7 @@ export function useThreadGitRightHeaderItems(props: ThreadGitControlsProps): Hea
 export function useThreadGitCenterHeaderItems(props: ThreadGitControlsProps): HeaderItems {
   const actionItems = useThreadGitHeaderActionItems(props);
   return useMemo(
-    () => [actionItems[1], actionItems[2], actionItems[0]].filter(Boolean) as HeaderItems,
+    () => [actionItems[2], actionItems[1], actionItems[0]].filter(Boolean) as HeaderItems,
     [actionItems],
   );
 }
