@@ -49,6 +49,7 @@ export function useNewThreadHandler() {
         startFromOrigin?: boolean;
       },
     ): Promise<void> => {
+      const composerDraftState = useComposerDraftStore.getState();
       const {
         getDraftSessionByLogicalProjectKey,
         getDraftSession,
@@ -56,7 +57,9 @@ export function useNewThreadHandler() {
         applyStickyState,
         setDraftThreadContext,
         setLogicalProjectDraftThreadId,
-      } = useComposerDraftStore.getState();
+        getStickyRuntimeMode,
+        stickyActiveProvider,
+      } = composerDraftState;
       const currentRouteTarget = getCurrentRouteTarget();
       const project = projects.find(
         (candidate) =>
@@ -160,6 +163,13 @@ export function useNewThreadHandler() {
       const threadId = newThreadId();
       const createdAt = new Date().toISOString();
       const initialEnvMode = options?.envMode ?? environmentSettings.defaultThreadEnvMode;
+      // A newly created draft adopts the sticky active provider (applied just
+      // below via `applyStickyState`), so seed its runtime mode from whatever
+      // that provider was last set to. Falls back to the default for a provider
+      // the user has never chosen a runtime mode for.
+      const initialRuntimeMode =
+        (stickyActiveProvider ? getStickyRuntimeMode(stickyActiveProvider) : null) ??
+        DEFAULT_RUNTIME_MODE;
       return (async () => {
         setLogicalProjectDraftThreadId(logicalProjectKey, projectRef, draftId, {
           threadId,
@@ -173,7 +183,7 @@ export function useNewThreadHandler() {
               envMode: initialEnvMode,
               newWorktreesStartFromOrigin: environmentSettings.newWorktreesStartFromOrigin,
             }),
-          runtimeMode: DEFAULT_RUNTIME_MODE,
+          runtimeMode: initialRuntimeMode,
         });
         applyStickyState(draftId);
 

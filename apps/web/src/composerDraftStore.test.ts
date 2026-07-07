@@ -131,6 +131,7 @@ function resetComposerDraftStore() {
     logicalProjectDraftThreadKeyByLogicalProjectKey: {},
     stickyModelSelectionByProvider: {},
     stickyActiveProvider: null,
+    stickyRuntimeModeByProvider: {},
   });
 }
 
@@ -1766,5 +1767,73 @@ describe("createDebouncedStorage", () => {
     vi.advanceTimersByTime(300);
     expect(base.setItem).toHaveBeenCalledTimes(1);
     expect(base.setItem).toHaveBeenCalledWith("key", "v2");
+  });
+});
+
+describe("composerDraftStore sticky runtime mode", () => {
+  beforeEach(() => {
+    resetComposerDraftStore();
+  });
+
+  it("records and reads the last runtime mode per provider instance", () => {
+    const store = useComposerDraftStore.getState();
+    store.setStickyRuntimeMode(CLAUDE_AGENT_INSTANCE, "auto");
+    store.setStickyRuntimeMode(CODEX_INSTANCE, "approval-required");
+
+    expect(useComposerDraftStore.getState().getStickyRuntimeMode(CLAUDE_AGENT_INSTANCE)).toBe(
+      "auto",
+    );
+    expect(useComposerDraftStore.getState().getStickyRuntimeMode(CODEX_INSTANCE)).toBe(
+      "approval-required",
+    );
+    // A provider the user never chose a mode for has no remembered value.
+    expect(useComposerDraftStore.getState().getStickyRuntimeMode(CURSOR_INSTANCE)).toBeNull();
+  });
+
+  it("accepts a provider driver kind and keeps the newest choice per provider", () => {
+    const store = useComposerDraftStore.getState();
+    store.setStickyRuntimeMode(CLAUDE_AGENT_DRIVER, "auto");
+    store.setStickyRuntimeMode(CLAUDE_AGENT_DRIVER, "full-access");
+
+    expect(useComposerDraftStore.getState().getStickyRuntimeMode(CLAUDE_AGENT_DRIVER)).toBe(
+      "full-access",
+    );
+  });
+
+  it("ignores invalid runtime modes", () => {
+    const store = useComposerDraftStore.getState();
+    store.setStickyRuntimeMode(CODEX_INSTANCE, "not-a-mode" as never);
+    expect(useComposerDraftStore.getState().getStickyRuntimeMode(CODEX_INSTANCE)).toBeNull();
+  });
+
+  it("round-trips through persistence and drops stale/invalid entries on hydrate", () => {
+    const persistApi = useComposerDraftStore.persist as unknown as {
+      getOptions: () => {
+        partialize: (state: ReturnType<typeof useComposerDraftStore.getState>) => {
+          stickyRuntimeModeByProvider?: Record<string, string>;
+        };
+        merge: (
+          persistedState: unknown,
+          currentState: ReturnType<typeof useComposerDraftStore.getState>,
+        ) => ReturnType<typeof useComposerDraftStore.getState>;
+      };
+    };
+
+    useComposerDraftStore.getState().setStickyRuntimeMode(CLAUDE_AGENT_INSTANCE, "auto");
+    const persisted = persistApi.getOptions().partialize(useComposerDraftStore.getState());
+    expect(persisted.stickyRuntimeModeByProvider?.[CLAUDE_AGENT_INSTANCE]).toBe("auto");
+
+    const merged = persistApi.getOptions().merge(
+      {
+        stickyRuntimeModeByProvider: {
+          [CLAUDE_AGENT_INSTANCE]: "auto",
+          [CODEX_INSTANCE]: "sudo-mode", // stale/removed mode from an older release
+        },
+      },
+      useComposerDraftStore.getState(),
+    );
+
+    expect(merged.stickyRuntimeModeByProvider[CLAUDE_AGENT_INSTANCE]).toBe("auto");
+    expect(merged.stickyRuntimeModeByProvider[CODEX_INSTANCE]).toBeUndefined();
   });
 });

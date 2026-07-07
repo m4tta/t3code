@@ -1072,6 +1072,7 @@ function ChatViewContent(props: ChatViewProps) {
   const setComposerDraftReviewComments = useComposerDraftStore((store) => store.setReviewComments);
   const setComposerDraftModelSelection = useComposerDraftStore((store) => store.setModelSelection);
   const setComposerDraftRuntimeMode = useComposerDraftStore((store) => store.setRuntimeMode);
+  const setStickyRuntimeMode = useComposerDraftStore((store) => store.setStickyRuntimeMode);
   const setComposerDraftInteractionMode = useComposerDraftStore(
     (store) => store.setInteractionMode,
   );
@@ -2713,6 +2714,12 @@ function ChatViewContent(props: ChatViewProps) {
       if (isLocalDraftThread) {
         setDraftThreadContext(composerDraftTarget, { runtimeMode: mode });
       }
+      // Remember this choice for the active provider so newly created threads
+      // reuse it (keyed by instance to match sticky model selection).
+      setStickyRuntimeMode(
+        activeProviderInstanceId ?? defaultInstanceIdForDriver(selectedProvider),
+        mode,
+      );
       scheduleComposerFocus();
     },
     [
@@ -2722,6 +2729,9 @@ function ChatViewContent(props: ChatViewProps) {
       composerDraftTarget,
       setComposerDraftRuntimeMode,
       setDraftThreadContext,
+      setStickyRuntimeMode,
+      activeProviderInstanceId,
+      selectedProvider,
     ],
   );
 
