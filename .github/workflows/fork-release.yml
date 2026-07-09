@@ -199,5 +199,5 @@ jobs:
           gh release create "${{ steps.meta.outputs.tag }}" \
             --repo "${{ github.repository }}" \
             --title "${{ steps.meta.outputs.tag }}" \
-            --notes "Unofficial fork build of T3 Code. Unsigned: macOS/Windows will warn on first launch (right-click → Open on macOS)." \
+            --notes $'Unofficial fork build of T3 Code (unsigned, not notarized).\n\nmacOS: the app is ad-hoc signed but not notarized, so first launch is blocked. Right-click the app → Open, then Open Anyway in System Settings → Privacy & Security. If macOS still says "damaged", clear quarantine: `xattr -dr com.apple.quarantine "/Applications/T3 Code (Alpha).app"`.\n\nWindows: SmartScreen → More info → Run anyway.' \
             dist/*

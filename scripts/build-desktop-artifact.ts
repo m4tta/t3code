@@ -1423,6 +1423,14 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
           schemes: ["t3code", "t3code-dev"],
         },
       ],
+      // Unsigned builds: force an ad-hoc signature (identity "-"). Without this,
+      // electron-builder skips signing entirely (CSC_IDENTITY_AUTO_DISCOVERY is
+      // false), which leaves the arm64 binary invalid — Apple Silicon then
+      // reports the download as "damaged" with no right-click-to-open escape.
+      // Ad-hoc signing makes the binary valid so users can open it via
+      // right-click → Open / System Settings. Real Developer ID signing (signed
+      // builds) keeps using auto-discovery, so only set this when unsigned.
+      ...(signed ? {} : { identity: "-" }),
       ...(macPasskeySigning
         ? {
             entitlements: macPasskeySigning.entitlementsPath,
