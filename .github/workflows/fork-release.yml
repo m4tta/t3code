@@ -44,8 +44,10 @@ jobs:
             platform: mac
             target: dmg
             arch: arm64
+          # macos-13 (Intel) was retired 2025-12-04; macos-15-intel is GitHub's
+          # replacement Intel runner. arm64 uses the standard macos-14 image.
           - label: macOS x64
-            runner: macos-13
+            runner: macos-15-intel
             platform: mac
             target: dmg
             arch: x64
