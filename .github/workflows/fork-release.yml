@@ -1,0 +1,201 @@
+name: Fork Release
+
+# Self-contained release pipeline for a personal fork. Unlike the upstream
+# release.yml, this workflow:
+#   - runs on GitHub-hosted runners (no Blacksmith),
+#   - builds UNSIGNED desktop artifacts (no Apple/Azure signing secrets),
+#   - skips the relay/Clerk/Vercel/npm/Discord jobs entirely,
+#   - publishes artifacts to THIS fork's GitHub Releases via the built-in token.
+#
+# The built app's electron-updater feed is pointed at this fork
+# (T3CODE_DESKTOP_UPDATE_REPOSITORY below), so installed fork builds check this
+# repo's Releases for updates. Auto-update works on Windows (nsis) and Linux
+# (AppImage); macOS auto-update generally requires a signed app, so on macOS the
+# updater will find the release but may not apply it without code signing.
+#
+# Trigger by pushing a version tag (e.g. `git tag v0.0.28-fork.1 && git push
+# --tags`) or via the "Run workflow" button (workflow_dispatch).
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version (e.g. 0.0.28-fork.1)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.label }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: macOS arm64
+            runner: macos-14
+            platform: mac
+            target: dmg
+            arch: arm64
+          - label: macOS x64
+            runner: macos-13
+            platform: mac
+            target: dmg
+            arch: x64
+          - label: Linux x64
+            runner: ubuntu-latest
+            platform: linux
+            target: AppImage
+            arch: x64
+          - label: Windows x64
+            runner: windows-latest
+            platform: win
+            target: nsis
+            arch: x64
+    env:
+      # Point the packaged app's auto-updater at this fork's Releases. Falls back
+      # to GITHUB_REPOSITORY inside the build script, but set explicitly so the
+      # intent is obvious and local `dist:desktop:*` runs can mirror it.
+      T3CODE_DESKTOP_UPDATE_REPOSITORY: ${{ github.repository }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@v1
+        with:
+          node-version-file: package.json
+          cache: true
+          run-install: true
+
+      - name: Ensure Electron runtime is installed
+        run: vp run --filter @t3tools/desktop ensure:electron
+
+      - name: Resolve release version
+        id: version
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            raw="${GITHUB_REF_NAME}"
+          else
+            raw="${{ inputs.version }}"
+          fi
+          echo "version=${raw#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Install ImageMagick (Linux icon generation)
+        if: matrix.platform == 'linux'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y imagemagick
+
+      # electron-builder may rebuild native modules for win32 during packaging,
+      # which needs the Spectre-mitigated MSVC runtime libraries. Mirrors the
+      # upstream Windows build step.
+      - name: Install Spectre-mitigated MSVC libs (Windows)
+        if: matrix.platform == 'win'
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $installPath = & $vswhere -products * -latest -property installationPath
+          $setupExe = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\setup.exe"
+          $proc = Start-Process -FilePath $setupExe `
+            -ArgumentList "modify", "--installPath", "`"$installPath`"", "--add", `
+            "Microsoft.VisualStudio.Component.VC.Tools.x86.x64.Spectre", "--quiet", "--norestart" `
+            -Wait -PassThru -NoNewWindow
+          if ($null -eq $proc -or $proc.ExitCode -ne 0) {
+            $code = if ($null -ne $proc) { $proc.ExitCode } else { 1 }
+            Write-Error "Visual Studio Installer failed with exit code $code"
+            exit $code
+          }
+
+      - name: Build desktop artifact (unsigned)
+        shell: bash
+        run: |
+          vp run dist:desktop:artifact \
+            --platform "${{ matrix.platform }}" \
+            --target "${{ matrix.target }}" \
+            --arch "${{ matrix.arch }}" \
+            --build-version "${{ steps.version.outputs.version }}" \
+            --verbose
+
+      - name: Collect release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release-publish
+          shopt -s nullglob
+          for pattern in \
+            "release/*.dmg" \
+            "release/*.zip" \
+            "release/*.AppImage" \
+            "release/*.exe" \
+            "release/*.blockmap" \
+            "release/*.yml"; do
+            for file in $pattern; do
+              cp "$file" release-publish/
+            done
+          done
+          # The macOS update manifest is arch-agnostic (latest-mac.yml), so the
+          # arm64 and x64 jobs would otherwise collide when merged. Suffix the
+          # x64 copy to keep both; electron-updater on macOS reads the arm64
+          # latest-mac.yml (unsigned macOS auto-update is best-effort anyway).
+          if [[ "${{ matrix.platform }}" == "mac" && "${{ matrix.arch }}" != "arm64" ]]; then
+            for manifest in release-publish/*-mac.yml; do
+              [ -e "$manifest" ] && mv "$manifest" "${manifest%.yml}-${{ matrix.arch }}.yml"
+            done
+          fi
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: desktop-${{ matrix.platform }}-${{ matrix.arch }}
+          path: release-publish/*
+          if-no-files-found: error
+
+  release:
+    name: Publish Fork Release
+    needs: [build]
+    if: ${{ !failure() && !cancelled() }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Resolve tag
+        id: meta
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            tag="${GITHUB_REF_NAME}"
+          else
+            raw="${{ inputs.version }}"
+            tag="v${raw#v}"
+          fi
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release create "${{ steps.meta.outputs.tag }}" \
+            --repo "${{ github.repository }}" \
+            --title "${{ steps.meta.outputs.tag }}" \
+            --notes "Unofficial fork build of T3 Code. Unsigned: macOS/Windows will warn on first launch (right-click → Open on macOS)." \
+            dist/*
