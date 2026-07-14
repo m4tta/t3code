@@ -828,7 +828,10 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         providerStatuses,
         selectedProvider,
       ),
-      supportsAutoRuntimeMode: getProviderAutoRuntimeModeSupport(providerStatuses, selectedProvider),
+      supportsAutoRuntimeMode: getProviderAutoRuntimeModeSupport(
+        providerStatuses,
+        selectedProvider,
+      ),
     }),
     [providerStatuses, selectedProvider],
   );

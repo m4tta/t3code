@@ -77,7 +77,7 @@ import { isElectron } from "../env";
 import { APP_STAGE_LABEL } from "../branding";
 import { useOpenPrLink } from "../lib/openPullRequestLink";
 import { isTerminalFocused } from "../lib/terminalFocus";
-import { isMacPlatform } from "../lib/utils";
+import { isMacPlatform, newThreadId } from "../lib/utils";
 import {
   readThreadShell,
   useProject,
@@ -1119,6 +1119,9 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
   const updateThreadMetadata = useAtomCommand(threadEnvironment.updateMetadata, {
     reportFailure: false,
   });
+  const branchThread = useAtomCommand(threadEnvironment.branch, {
+    reportFailure: false,
+  });
   const updateSettings = useUpdateClientSettings();
   const sidebarThreadPreviewCount = useClientSettings<SidebarThreadPreviewCount>(
     (settings) => settings.sidebarThreadPreviewCount,
@@ -2127,6 +2130,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         [
           { id: "rename", label: "Rename thread" },
           { id: "mark-unread", label: "Mark unread" },
+          { id: "branch", label: "Branch thread" },
           { id: "copy-path", label: "Copy Path" },
           { id: "copy-thread-id", label: "Copy Thread ID" },
           { id: "delete", label: "Delete", destructive: true, icon: "trash" },
@@ -2136,6 +2140,37 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
 
       if (clicked === "rename") {
         startThreadRename(threadKey, thread.title);
+        return;
+      }
+
+      if (clicked === "branch") {
+        const branchThreadRef = scopeThreadRef(threadRef.environmentId, newThreadId());
+        const result = await branchThread({
+          environmentId: threadRef.environmentId,
+          input: {
+            sourceThreadId: threadRef.threadId,
+            threadId: branchThreadRef.threadId,
+            title: `${thread.title} (Branched)`,
+          },
+        });
+        if (result._tag === "Failure") {
+          if (isAtomCommandInterrupted(result)) {
+            return;
+          }
+          const error = squashAtomCommandFailure(result);
+          toastManager.add(
+            stackedThreadToast({
+              type: "error",
+              title: "Failed to branch thread",
+              description: error instanceof Error ? error.message : "An error occurred.",
+            }),
+          );
+          return;
+        }
+        await router.navigate({
+          to: "/$environmentId/$threadId",
+          params: buildThreadRouteParams(branchThreadRef),
+        });
         return;
       }
 
@@ -2187,12 +2222,14 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
     },
     [
       appSettingsConfirmThreadDelete,
+      branchThread,
       copyPathToClipboard,
       copyThreadIdToClipboard,
       deleteThread,
       markThreadUnread,
       memberProjectByScopedKey,
       project.workspaceRoot,
+      router,
       startThreadRename,
     ],
   );

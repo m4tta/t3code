@@ -1001,6 +1001,7 @@ function ChatViewContent(props: ChatViewProps) {
   const writeTerminal = useAtomCommand(terminalEnvironment.write, "terminal write");
   const closeTerminalMutation = useAtomCommand(terminalEnvironment.close, "terminal close");
   const createThread = useAtomCommand(threadEnvironment.create, { reportFailure: false });
+  const branchThread = useAtomCommand(threadEnvironment.branch, { reportFailure: false });
   const deleteThread = useAtomCommand(threadEnvironment.delete, { reportFailure: false });
   const updateThreadMetadata = useAtomCommand(threadEnvironment.updateMetadata, {
     reportFailure: false,
@@ -4918,6 +4919,62 @@ function ChatViewContent(props: ChatViewProps) {
     }
     void onRevertToTurnCountRef.current(targetTurnCount);
   }, []);
+  const activeThreadValueRef = useRef(activeThread);
+  activeThreadValueRef.current = activeThread;
+  const onBranchAssistantMessage = useCallback(
+    async (messageId: MessageId) => {
+      const thread = activeThreadValueRef.current;
+      if (!thread || !isServerThread) {
+        return;
+      }
+
+      if (activeEnvironmentUnavailable && activeEnvironmentUnavailableLabel) {
+        setThreadError(
+          thread.id,
+          `Reconnect ${activeEnvironmentUnavailableLabel} before branching this message.`,
+        );
+        return;
+      }
+
+      const branchThreadId = newThreadId();
+      const result = await branchThread({
+        environmentId: thread.environmentId,
+        input: {
+          sourceThreadId: thread.id,
+          sourceMessageId: messageId,
+          threadId: branchThreadId,
+          title: `${thread.title} (Branched)`,
+        },
+      });
+      if (result._tag === "Failure") {
+        if (isAtomCommandInterrupted(result)) {
+          return;
+        }
+        const error = squashAtomCommandFailure(result);
+        setThreadError(
+          thread.id,
+          error instanceof Error ? error.message : "Failed to branch from this message.",
+        );
+        return;
+      }
+
+      await navigate({
+        to: "/$environmentId/$threadId",
+        params: {
+          environmentId: thread.environmentId,
+          threadId: branchThreadId,
+        },
+      });
+    },
+    [
+      activeEnvironmentUnavailable,
+      activeEnvironmentUnavailableLabel,
+      branchThread,
+      isServerThread,
+      navigate,
+      setThreadError,
+    ],
+  );
 
   // Empty state: no active thread
   if (!activeThread) {
@@ -5098,6 +5155,7 @@ function ChatViewContent(props: ChatViewProps) {
                 onOpenTurnDiff={onOpenTurnDiff}
                 revertTurnCountByUserMessageId={revertTurnCountByUserMessageId}
                 onRevertUserMessage={onRevertUserMessage}
+                onBranchAssistantMessage={onBranchAssistantMessage}
                 isRevertingCheckpoint={isRevertingCheckpoint}
                 onImageExpand={onExpandTimelineImage}
                 markdownCwd={gitCwd ?? undefined}

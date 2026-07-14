@@ -4,6 +4,7 @@ import { Atom } from "effect/unstable/reactivity";
 import { createAtomCommandScheduler, createEnvironmentCommand } from "./runtime.ts";
 import {
   type ArchiveThreadInput,
+  type BranchThreadInput,
   type CreateThreadInput,
   type DeleteThreadInput,
   type InterruptThreadTurnInput,
@@ -17,6 +18,7 @@ import {
   type UnarchiveThreadInput,
   type UpdateThreadMetadataInput,
   archiveThread,
+  branchThread,
   createThread,
   deleteThread,
   interruptThreadTurn,
@@ -34,6 +36,7 @@ import type { EnvironmentRegistry } from "../connection/registry.ts";
 
 export type {
   ArchiveThreadInput,
+  BranchThreadInput,
   CreateThreadInput,
   DeleteThreadInput,
   InterruptThreadTurnInput,
@@ -61,6 +64,12 @@ export function createThreadEnvironmentAtoms<R, E>(
     create: createEnvironmentCommand(runtime, {
       label: "environment-data:commands:thread:create",
       execute: (input: CreateThreadInput) => createThread(input),
+      scheduler,
+      concurrency,
+    }),
+    branch: createEnvironmentCommand(runtime, {
+      label: "environment-data:commands:thread:branch",
+      execute: (input: BranchThreadInput) => branchThread(input),
       scheduler,
       concurrency,
     }),

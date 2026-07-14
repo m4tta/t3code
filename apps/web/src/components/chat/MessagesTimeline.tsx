@@ -46,6 +46,7 @@ import {
   ChevronRightIcon,
   CircleAlertIcon,
   EyeIcon,
+  GitBranchIcon,
   GlobeIcon,
   HammerIcon,
   MessageCircleIcon,
@@ -130,6 +131,7 @@ interface TimelineRowSharedState {
   skills: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">>;
   activeThreadEnvironmentId: EnvironmentId;
   onRevertUserMessage: (messageId: MessageId) => void;
+  onBranchAssistantMessage: (messageId: MessageId) => void;
   onImageExpand: (preview: ExpandedImagePreview) => void;
   onOpenTurnDiff: (turnId: TurnId, filePath?: string) => void;
   onToggleTurnFold: (turnId: TurnId) => void;
@@ -165,6 +167,7 @@ interface MessagesTimelineProps {
   onOpenTurnDiff: (turnId: TurnId, filePath?: string) => void;
   revertTurnCountByUserMessageId: Map<MessageId, number>;
   onRevertUserMessage: (messageId: MessageId) => void;
+  onBranchAssistantMessage: (messageId: MessageId) => void;
   isRevertingCheckpoint: boolean;
   onImageExpand: (preview: ExpandedImagePreview) => void;
   activeThreadEnvironmentId: EnvironmentId;
@@ -198,6 +201,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   onOpenTurnDiff,
   revertTurnCountByUserMessageId,
   onRevertUserMessage,
+  onBranchAssistantMessage,
   isRevertingCheckpoint,
   onImageExpand,
   activeThreadEnvironmentId,
@@ -417,6 +421,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       skills,
       activeThreadEnvironmentId,
       onRevertUserMessage,
+      onBranchAssistantMessage,
       onImageExpand,
       onOpenTurnDiff,
       onToggleTurnFold,
@@ -431,6 +436,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       skills,
       activeThreadEnvironmentId,
       onRevertUserMessage,
+      onBranchAssistantMessage,
       onImageExpand,
       onOpenTurnDiff,
       onToggleTurnFold,
@@ -997,6 +1003,24 @@ function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "mess
         {row.showAssistantMeta ? (
           <div className="mt-1.5 flex items-center gap-2 text-xs tabular-nums opacity-0 transition-opacity duration-200 focus-within:opacity-100 group-hover/assistant:opacity-100">
             <AssistantCopyButton row={row} />
+            {row.showAssistantCopyButton && !row.assistantCopyStreaming ? (
+              <Tooltip>
+                <TooltipTrigger
+                  render={
+                    <Button
+                      aria-label="Branch from message"
+                      onClick={() => ctx.onBranchAssistantMessage(row.message.id)}
+                      type="button"
+                      size="icon-xs"
+                      variant="ghost"
+                    />
+                  }
+                >
+                  <GitBranchIcon className="size-3" />
+                </TooltipTrigger>
+                <TooltipPopup>Branch from this message</TooltipPopup>
+              </Tooltip>
+            ) : null}
             {!row.message.streaming && (
               <Tooltip>
                 <TooltipTrigger

@@ -344,6 +344,28 @@ it.effect("decodes thread archive and unarchive commands", () =>
   }),
 );
 
+it.effect("decodes thread branch commands", () =>
+  Effect.gen(function* () {
+    const branch = yield* decodeOrchestrationCommand({
+      type: "thread.branch",
+      commandId: "cmd-branch-1",
+      sourceThreadId: "thread-source",
+      sourceMessageId: "message-source",
+      threadId: "thread-branch",
+      title: "Source (Branched)",
+      createdAt: "2026-01-01T00:00:00.000Z",
+    });
+
+    if (branch.type !== "thread.branch") {
+      throw new Error(`Expected thread.branch, received ${branch.type}`);
+    }
+
+    assert.strictEqual(branch.sourceThreadId, "thread-source");
+    assert.strictEqual(branch.sourceMessageId, "message-source");
+    assert.strictEqual(branch.threadId, "thread-branch");
+  }),
+);
+
 it.effect("decodes thread archived and unarchived events", () =>
   Effect.gen(function* () {
     const archived = yield* decodeOrchestrationEvent({
