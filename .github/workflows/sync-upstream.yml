@@ -1,0 +1,96 @@
+name: Sync Upstream
+
+on:
+  schedule:
+    - cron: "0 6 * * *"
+      timezone: "America/Los_Angeles"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: sync-upstream-main
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: Open and auto-merge upstream sync PR
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ github.token }}
+      BASE_REPOSITORY: ${{ github.repository }}
+      UPSTREAM_REPOSITORY: pingdotgg/t3code
+      UPSTREAM_OWNER: pingdotgg
+    steps:
+      - name: Create or update upstream sync PR
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          upstream_sha="$(
+            gh api "repos/${UPSTREAM_REPOSITORY}/commits/main" --jq '.sha'
+          )"
+          ahead_by="$(
+            gh api \
+              "repos/${BASE_REPOSITORY}/compare/main...${UPSTREAM_OWNER}:main" \
+              --jq '.ahead_by'
+          )"
+
+          if [[ "${ahead_by}" == "0" ]]; then
+            echo "Fork main already contains upstream main (${upstream_sha})."
+            exit 0
+          fi
+
+          pr_number="$(
+            gh api \
+              "repos/${BASE_REPOSITORY}/pulls?state=open&base=main&head=${UPSTREAM_OWNER}:main" \
+              --jq '.[0].number // empty'
+          )"
+
+          if [[ -z "${pr_number}" ]]; then
+            pr_url="$(
+              gh pr create \
+                --repo "${BASE_REPOSITORY}" \
+                --base main \
+                --head "${UPSTREAM_OWNER}:main" \
+                --title "Sync upstream main" \
+                --body "Automated daily sync from \`${UPSTREAM_REPOSITORY}:main\`. If GitHub reports this PR as conflict-free, the workflow enables merge-commit auto-merge. Conflicting PRs remain open for manual resolution." \
+                --no-maintainer-edit
+            )"
+            pr_number="${pr_url##*/}"
+            echo "Created ${pr_url}."
+          else
+            echo "Using existing upstream sync PR #${pr_number}."
+          fi
+
+          mergeable=""
+          for _ in {1..12}; do
+            mergeable="$(
+              gh api "repos/${BASE_REPOSITORY}/pulls/${pr_number}" --jq '.mergeable'
+            )"
+            if [[ "${mergeable}" == "true" || "${mergeable}" == "false" ]]; then
+              break
+            fi
+            sleep 5
+          done
+
+          if [[ "${mergeable}" == "false" ]]; then
+            echo "::warning title=Upstream sync has conflicts::PR #${pr_number} requires manual conflict resolution."
+            exit 0
+          fi
+
+          if [[ "${mergeable}" != "true" ]]; then
+            echo "::error title=Mergeability unavailable::GitHub did not compute mergeability for PR #${pr_number} in time."
+            exit 1
+          fi
+
+          gh pr merge "${pr_number}" \
+            --repo "${BASE_REPOSITORY}" \
+            --auto \
+            --merge \
+            --match-head-commit "${upstream_sha}"
+
+          echo "Auto-merge enabled for conflict-free upstream sync PR #${pr_number}."
