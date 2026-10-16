@@ -1,6 +1,7 @@
 import * as DocumentText from "../../provider/DocumentText.ts";
 import { makeProviderTextDeltaCoalescer } from "./ProviderTextDeltaCoalescer.ts";
 import { claudeTaskOutputRoot, tailClaudeTaskOutput } from "./ClaudeTaskOutputTail.ts";
+import { registerClaudeMcpServers } from "./ClaudeInProcessMcpServer.ts";
 import {
   dynamicToolTitle,
   formatReadToolLabel,
@@ -1037,11 +1038,10 @@ export const layerQueryRunner: Layer.Layer<
                   Effect.gen(function* () {
                     if (mcpServers !== undefined) {
                       // Errors and mcp_status can echo headers; log only server names.
-                      const failed = yield* Effect.tryPromise(() =>
-                        queryRuntime.setMcpServers(mcpServers),
-                      ).pipe(
-                        Effect.map((result) => Object.keys(result.errors)),
-                        Effect.orElseSucceed(() => Object.keys(mcpServers)),
+                      const registration = yield* registerClaudeMcpServers({
+                        servers: mcpServers,
+                        setMcpServers: (servers) => queryRuntime.setMcpServers(servers),
+                      }).pipe(
                         Effect.timeoutOrElse({
                           duration: CLAUDE_MCP_REGISTRATION_TIMEOUT,
                           orElse: () =>
@@ -1060,12 +1060,17 @@ export const layerQueryRunner: Layer.Layer<
                             ),
                         }),
                       );
-                      if (failed.length > 0) {
+                      if (registration.inProcess) {
+                        yield* Effect.logInfo("orchestration-v2.claude-t3-mcp-served-in-process", {
+                          threadId: input.threadId,
+                        });
+                      }
+                      if (registration.failed.length > 0) {
                         yield* Effect.logWarning(
                           "orchestration-v2.claude-mcp-servers-unavailable",
                           {
                             threadId: input.threadId,
-                            servers: failed,
+                            servers: registration.failed,
                           },
                         );
                       }
