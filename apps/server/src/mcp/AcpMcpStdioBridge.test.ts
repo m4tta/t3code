@@ -5,7 +5,12 @@ import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 
-import { AcpMcpBridgeError, callAcpMcpTool, runAcpMcpStdioBridge } from "./AcpMcpStdioBridge.ts";
+import {
+  AcpMcpBridgeError,
+  callAcpMcpTool,
+  describeAcpMcpTool,
+  runAcpMcpStdioBridge,
+} from "./AcpMcpStdioBridge.ts";
 
 function makeHarness(responder: (request: Request) => Promise<Response> | Response) {
   const input = new NodeStream.PassThrough();
@@ -87,6 +92,51 @@ describe("AcpMcpStdioBridge", () => {
         method: "tools/call",
         params: { name: "orchestrator_capabilities", arguments: {} },
       });
+    }),
+  );
+
+  it.effect("describes one tool, or lists the tool names, from tools/list", () =>
+    Effect.gen(function* () {
+      const delegateTask = {
+        name: "delegate_task",
+        description: "Delegate a task.",
+        inputSchema: { type: "object", required: ["task"] },
+      };
+      const options = {
+        endpoint: "http://127.0.0.1:1/mcp",
+        authorization: "Bearer bridge-test",
+        fetchImplementation: async (_url: string, init?: RequestInit) => {
+          const request = JSON.parse(String(init?.body ?? "{}")) as {
+            readonly id?: unknown;
+            readonly method?: unknown;
+          };
+          if (request.method === "notifications/initialized") {
+            return new Response(null, { status: 202 });
+          }
+          return Response.json({
+            jsonrpc: "2.0",
+            id: request.id,
+            result:
+              request.method === "initialize"
+                ? { protocolVersion: "2025-06-18", capabilities: {}, serverInfo: {} }
+                : { tools: [delegateTask, { name: "task_status", inputSchema: {} }] },
+          });
+        },
+      };
+
+      expect(yield* describeAcpMcpTool({ ...options, tool: "delegate_task" })).toEqual(
+        delegateTask,
+      );
+      expect(yield* describeAcpMcpTool(options)).toEqual({
+        tools: ["delegate_task", "task_status"],
+      });
+      const missing = yield* describeAcpMcpTool({ ...options, tool: "delegate" }).pipe(
+        Effect.asVoid,
+        Effect.flip,
+      );
+      expect(missing.message).toBe(
+        "No T3 Code tool named delegate. Available tools: delegate_task, task_status.",
+      );
     }),
   );
 

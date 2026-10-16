@@ -37,6 +37,11 @@ describe("parseT3McpTerminalCommand", () => {
     expect(parseT3McpTerminalCommand(`echo t3-mcp task_status '{}'`, options)).toBeUndefined();
     expect(parseT3McpTerminalCommand("git status", options)).toBeUndefined();
   });
+
+  it("leaves schema lookups as plain commands", () => {
+    expect(parseT3McpTerminalCommand("t3-mcp --schema delegate_task")).toBeUndefined();
+    expect(parseT3McpTerminalCommand("t3-mcp --schema", { wholeCommand: true })).toBeUndefined();
+  });
 });
 
 describe("parseT3McpTerminalOutput", () => {

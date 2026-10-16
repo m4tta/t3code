@@ -73,6 +73,8 @@ export const T3_CODE_TERMINAL_ORCHESTRATION_INSTRUCTIONS = `
 
 T3 Code's app-owned orchestration tools are not attached as MCP tools in this session, so do not search the tool catalog for them. Call them with the \`t3-mcp\` terminal command instead, one call per Bash command: \`t3-mcp <tool> '<json>'\`. \`<json>\` is one JSON object holding the tool's arguments, in single quotes; pass \`'{}'\` for a tool without arguments, and write a single quote inside the JSON as \`\\u0027\`. Do not pipe, redirect, or chain the command with \`&&\` or \`;\`. It prints the tool result as JSON. Start with \`t3-mcp orchestrator_capabilities '{}'\`.
 
+This session has no tool catalog, so before your first call to a tool, run \`t3-mcp --schema <tool>\` for its description and input schema; \`t3-mcp --schema\` lists the tool names. Do not guess argument names: the tools ignore keys they do not know instead of rejecting them. For example, the provider and model of a delegated task go in a nested \`target\`: \`t3-mcp delegate_task '{"task":"...","target":{"providerInstanceId":"...","model":"..."},"mode":"async","clientRequestId":"..."}'\`.
+
 Calls that wait, such as \`t3_thread_wait\` or \`delegate_task\` with \`"mode":"wait"\`, block for up to their \`timeoutMs\` (10 minutes by default), longer than the default Bash timeout. Prefer \`delegate_task\` with \`"mode":"async"\`; its completion wakes this thread. When you must wait mid-turn, use short \`t3_thread_wait\` calls: set a small \`timeoutMs\` and pass the Bash tool a \`timeout\` above it. Keep polling and wait loops bounded, do not duplicate active work, and use stable \`clientRequestId\` values when retrying tools that accept them.
 
 Treat these concepts distinctly:

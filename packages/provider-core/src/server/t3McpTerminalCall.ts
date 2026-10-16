@@ -20,13 +20,16 @@ export interface T3McpTerminalOutput {
   readonly isError: boolean;
 }
 
+// Tool names start with a letter, so flags such as `--schema` stay plain
+// commands instead of rendering as a call to a tool named after the flag.
+
 /** An invocation anywhere in a command line, such as after `"$T3_ACP_MCP_NODE" ...`. */
 const T3_MCP_TERMINAL_CALL =
-  /(?:^|[\s"'=/])(?:acp-mcp-call|t3-mcp)[\s"']+([A-Za-z0-9_.-]+)(?:\s+(.+?))?\s*$/u;
+  /(?:^|[\s"'=/])(?:acp-mcp-call|t3-mcp)[\s"']+([A-Za-z][A-Za-z0-9_.-]*)(?:\s+(.+?))?\s*$/u;
 
 /** An invocation that is the whole command line, optionally path-prefixed. */
 const T3_MCP_WHOLE_TERMINAL_CALL =
-  /^\s*(?:[^\s"'|&;<>()$`]*\/)?(?:acp-mcp-call|t3-mcp)\s+([A-Za-z0-9_.-]+)(?:\s+(.+?))?\s*$/u;
+  /^\s*(?:[^\s"'|&;<>()$`]*\/)?(?:acp-mcp-call|t3-mcp)\s+([A-Za-z][A-Za-z0-9_.-]*)(?:\s+(.+?))?\s*$/u;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);

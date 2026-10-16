@@ -53,12 +53,20 @@ function protocolVersionOf(entry: unknown): string | null {
   return typeof version === "string" && version.length > 0 ? version : null;
 }
 
-export interface AcpMcpToolCallOptions {
+export interface AcpMcpEndpointOptions {
   readonly endpoint: string;
   readonly authorization: string;
+  readonly fetchImplementation?: (url: string, init?: RequestInit) => Promise<Response>;
+}
+
+export interface AcpMcpToolCallOptions extends AcpMcpEndpointOptions {
   readonly tool: string;
   readonly arguments: Readonly<Record<string, unknown>>;
-  readonly fetchImplementation?: (url: string, init?: RequestInit) => Promise<Response>;
+}
+
+export interface AcpMcpToolSchemaOptions extends AcpMcpEndpointOptions {
+  /** Omit to list the tool names. */
+  readonly tool?: string;
 }
 
 /**
@@ -68,6 +76,50 @@ export interface AcpMcpToolCallOptions {
  */
 export function callAcpMcpTool(
   options: AcpMcpToolCallOptions,
+): Effect.Effect<unknown, AcpMcpBridgeError> {
+  return requestAcpMcp(options, "tools/call", {
+    name: options.tool,
+    arguments: options.arguments,
+  });
+}
+
+/**
+ * Terminal callers get no MCP tool catalog, so without this they would have
+ * to guess argument names, and the server ignores keys it does not know.
+ */
+export function describeAcpMcpTool(
+  options: AcpMcpToolSchemaOptions,
+): Effect.Effect<unknown, AcpMcpBridgeError> {
+  return Effect.gen(function* () {
+    const result = yield* requestAcpMcp(options, "tools/list", {});
+    const listed =
+      typeof result === "object" && result !== null
+        ? (result as { readonly tools?: unknown }).tools
+        : undefined;
+    const tools = Array.isArray(listed)
+      ? listed.filter(
+          (tool): tool is { readonly name: string } =>
+            typeof tool === "object" && tool !== null && typeof tool.name === "string",
+        )
+      : [];
+    const names = tools.map((tool) => tool.name);
+    if (options.tool === undefined) return { tools: names };
+    const match = tools.find((tool) => tool.name === options.tool);
+    if (match === undefined) {
+      return yield* Effect.fail(
+        new AcpMcpBridgeError(
+          `No T3 Code tool named ${options.tool}. Available tools: ${names.join(", ")}.`,
+        ),
+      );
+    }
+    return match;
+  });
+}
+
+function requestAcpMcp(
+  options: AcpMcpEndpointOptions,
+  method: "tools/call" | "tools/list",
+  params: Readonly<Record<string, unknown>>,
 ): Effect.Effect<unknown, AcpMcpBridgeError> {
   const fetchImplementation = options.fetchImplementation ?? fetch;
   return Effect.gen(function* () {
@@ -124,19 +176,14 @@ export function callAcpMcpTool(
     }
     yield* send({ jsonrpc: "2.0", method: "notifications/initialized" });
 
-    const callId = "t3-acp-cli-tool-call";
-    const responses = yield* send({
-      jsonrpc: "2.0",
-      id: callId,
-      method: "tools/call",
-      params: { name: options.tool, arguments: options.arguments },
-    });
-    const response = responses.find((entry) => asEnvelope(entry)?.id === callId);
+    const requestId = `t3-acp-cli-${method}`;
+    const responses = yield* send({ jsonrpc: "2.0", id: requestId, method, params });
+    const response = responses.find((entry) => asEnvelope(entry)?.id === requestId);
     const envelope = asEnvelope(response);
     if (envelope === null || envelope.error !== undefined) {
       return yield* Effect.fail(
         new AcpMcpBridgeError(
-          `T3 Code MCP tool call failed${envelope?.error === undefined ? "." : `: ${JSON.stringify(envelope.error)}`}`,
+          `T3 Code MCP ${method === "tools/call" ? "tool call" : "tool listing"} failed${envelope?.error === undefined ? "." : `: ${JSON.stringify(envelope.error)}`}`,
         ),
       );
     }
@@ -316,8 +363,21 @@ export async function runAcpMcpCliFastPath(
     return;
   }
   const [tool, argumentsJson] = args;
+  if (tool === "--schema") {
+    const schema = await Effect.runPromise(
+      describeAcpMcpTool({
+        endpoint,
+        authorization,
+        ...(argumentsJson === undefined ? {} : { tool: argumentsJson }),
+      }),
+    );
+    process.stdout.write(`${JSON.stringify(schema)}\n`);
+    return;
+  }
   if (tool === undefined || argumentsJson === undefined) {
-    process.stderr.write("acp-mcp-call requires <tool> and <arguments-json>.\n");
+    process.stderr.write(
+      "acp-mcp-call requires <tool> and <arguments-json>, or --schema [tool].\n",
+    );
     process.exitCode = 2;
     return;
   }
