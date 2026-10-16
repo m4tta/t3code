@@ -2780,7 +2780,10 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
           role: "Viewer",
         },
       ],
-      ...(signed ? { sign: path.join(repoRoot, "scripts/sign-macos.ts") } : {}),
+      // Unsigned builds get an ad-hoc signature. Without one, electron-builder
+      // skips signing (CSC_IDENTITY_AUTO_DISCOVERY is false) and Apple Silicon
+      // reports the download as damaged with no way to open it.
+      ...(signed ? { sign: path.join(repoRoot, "scripts/sign-macos.ts") } : { identity: "-" }),
       ...(macPasskeySigning
         ? {
             entitlements: macPasskeySigning.entitlementsPath,
