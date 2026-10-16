@@ -3534,9 +3534,11 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
       const target = path.join(binDirectory, "t3-mcp");
       const staged = `${target}.${yield* crypto.randomUUIDv4()}.tmp`;
       yield* fileSystem.makeDirectory(binDirectory, { recursive: true });
-      yield* fileSystem.writeFileString(staged, CLAUDE_T3_MCP_SHIM);
-      yield* fileSystem.chmod(staged, 0o755);
-      yield* fileSystem.rename(staged, target);
+      yield* Effect.gen(function* () {
+        yield* fileSystem.writeFileString(staged, CLAUDE_T3_MCP_SHIM);
+        yield* fileSystem.chmod(staged, 0o755);
+        yield* fileSystem.rename(staged, target);
+      }).pipe(Effect.onError(() => fileSystem.remove(staged).pipe(Effect.ignore)));
     }).pipe(
       Effect.mapError(
         (cause) =>

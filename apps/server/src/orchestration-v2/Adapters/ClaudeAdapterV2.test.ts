@@ -2850,6 +2850,56 @@ describe("ClaudeAdapterV2 background wake turns", () => {
     ),
   );
 
+  it.effect("removes the staged t3-mcp shim when installing it fails", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const binDirectory = yield* fileSystem.makeTempDirectoryScoped({
+          prefix: "t3-claude-v2-bin-",
+        });
+        yield* fileSystem.makeDirectory(`${binDirectory}/t3-mcp`);
+        yield* fileSystem.writeFileString(`${binDirectory}/t3-mcp/occupied`, "");
+        const harness = yield* makeWakeHarnessWithOptions({
+          settings: TERMINAL_TOOLS_CLAUDE_SETTINGS,
+          t3ToolsTerminal: {
+            selfInvocation: { command: "/opt/t3/node", entrypoint: "/opt/t3/bin.mjs" },
+            binDirectory,
+            pathDelimiter: ":",
+          },
+        });
+        const mcpSessions = yield* McpProviderSessions.McpProviderSessions;
+        yield* mcpSessions.set({
+          environmentId: EnvironmentId.make("environment-claude-terminal"),
+          threadId: harness.threadId,
+          providerSessionId: "mcp-session-claude-terminal",
+          providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+          endpoint: "http://127.0.0.1:43123/mcp",
+          authorizationHeader: "Bearer terminal-claude-token",
+          browserToolsAvailable: true,
+        });
+        const exit = yield* Effect.exit(
+          harness.runtime.startTurn(
+            makeClaudeTestTurnInput({
+              threadId: harness.threadId,
+              providerThread: harness.providerThread,
+              now: yield* DateTime.now,
+              attemptId: RunAttemptId.make("attempt-claude-terminal-shim-failure"),
+              text: "Delegate this.",
+              attachments: [],
+            }),
+          ),
+        );
+
+        assert.isTrue(Exit.isFailure(exit));
+        assert.deepEqual(yield* fileSystem.readDirectory(binDirectory), ["t3-mcp"]);
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        ),
+      ),
+    ),
+  );
+
   it.effect.each([
     { isError: false, title: "Check weather" },
     { isError: true, title: "Check weather" },
