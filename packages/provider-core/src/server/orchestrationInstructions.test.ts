@@ -60,7 +60,9 @@ describe("T3 orchestration provider instructions", () => {
     assert.include(injected, "T3 Code interaction mode: Default");
     assert.include(injected, "T3 Code collaborative browser");
     assert.include(injected, "T3 Code orchestration");
+    assert.include(injected, "ACP fallback");
     assert.include(injected, "<user_request>\nInspect the repository.\n</user_request>");
+    assert.notInclude(T3_CODE_ORCHESTRATION_INSTRUCTIONS, "ACP fallback");
   });
 
   it("reinjects ACP guidance only when mode or tool availability changes", () => {

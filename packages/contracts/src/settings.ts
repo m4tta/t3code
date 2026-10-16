@@ -608,6 +608,20 @@ export type CodexSettings = typeof CodexSettings.Type;
 
 const CLAUDE_AUTO_COMPACT_WINDOW_PATTERN = /^(?:|[1-9]\d{5}|1000000)$/;
 
+/**
+ * How Claude sessions reach T3 Code's orchestration tools. "terminal" is for
+ * Claude Code installs whose MCP policy rejects the `t3-code` server: the
+ * agent calls the tools with the `t3-mcp` command through its Bash tool.
+ */
+export const CLAUDE_T3_TOOLS_TRANSPORTS = [
+  { value: "mcp", label: "MCP server" },
+  { value: "terminal", label: "Terminal" },
+] as const satisfies ReadonlyArray<ProviderSettingsFormOption>;
+export const ClaudeT3ToolsTransport = Schema.Literals(
+  CLAUDE_T3_TOOLS_TRANSPORTS.map((transport) => transport.value),
+);
+export type ClaudeT3ToolsTransport = typeof ClaudeT3ToolsTransport.Type;
+
 export const ClaudeSettings = makeProviderSettingsSchema(
   {
     enabled: Schema.Boolean.pipe(
@@ -659,9 +673,22 @@ export const ClaudeSettings = makeProviderSettingsSchema(
         },
       }),
     ),
+    t3ToolsTransport: ClaudeT3ToolsTransport.pipe(
+      Schema.withDecodingDefault(Effect.succeed("mcp" as const)),
+      Schema.annotateKey({
+        title: "T3 tools",
+        description:
+          "Use Terminal only when a Claude Code MCP allowlist blocks T3 Code's tools. Claude then calls them with a t3-mcp shell command, so any command the agent runs can read the session's T3 token. Read-only sessions get no T3 tools in this mode.",
+        providerSettingsForm: {
+          control: "select",
+          options: CLAUDE_T3_TOOLS_TRANSPORTS,
+          clearWhenEmpty: "omit",
+        },
+      }),
+    ),
   },
   {
-    order: ["binaryPath", "homePath", "autoCompactWindow", "launchArgs"],
+    order: ["binaryPath", "homePath", "autoCompactWindow", "launchArgs", "t3ToolsTransport"],
   },
 );
 export type ClaudeSettings = typeof ClaudeSettings.Type;

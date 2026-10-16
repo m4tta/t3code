@@ -48,6 +48,8 @@ import * as NodeChildProcess from "node:child_process";
 import { parseCliArgs } from "@t3tools/shared/cliArgs";
 import { AgentScope } from "@t3tools/shared/AgentScope";
 import * as HostProcess from "@t3tools/shared/HostProcess";
+import { type SelfInvocation, resolveSelfInvocation } from "@t3tools/shared/nodeRuntime";
+import { T3_MCP_TOOL_NAMES } from "@t3tools/shared/t3McpToolPresentation";
 import { applyClaudePromptEffortPrefix } from "@t3tools/shared/model";
 import {
   CLAUDE_RESUME_COMPACTION_NEVER_ANSWER,
@@ -142,8 +144,15 @@ import {
 } from "../../provider/claudeUsageLimits.ts";
 import type { ManagedServerProvider } from "@t3tools/provider-core/server/snapshot";
 import { mergeProviderInstanceEnvironment } from "@t3tools/provider-core/server/instanceEnvironment";
-import { T3_CODE_ORCHESTRATION_INSTRUCTIONS } from "@t3tools/provider-core/server/orchestrationInstructions";
+import {
+  T3_CODE_ORCHESTRATION_INSTRUCTIONS,
+  T3_CODE_TERMINAL_ORCHESTRATION_INSTRUCTIONS,
+} from "@t3tools/provider-core/server/orchestrationInstructions";
 import { buildRuntimeInstructions } from "@t3tools/provider-core/server/runtimeInstructions";
+import {
+  parseT3McpTerminalCommand,
+  parseT3McpTerminalOutput,
+} from "@t3tools/provider-core/server/t3McpTerminalCall";
 import {
   mcpToolPresentation,
   normalizeMcpText,
@@ -803,6 +812,11 @@ export const layerQueryRunner: Layer.Layer<
                       yield* Effect.logWarning("orchestration-v2.claude-mcp-servers-unavailable", {
                         threadId: input.threadId,
                         servers: failed,
+                        ...(failed.includes("t3-code")
+                          ? {
+                              hint: "If a Claude Code MCP allowlist blocks t3-code, set the Claude provider's 'T3 tools' setting to Terminal.",
+                            }
+                          : {}),
                       });
                     }
                   }
@@ -1066,6 +1080,8 @@ export function makeClaudeQueryOptions(input: {
   readonly sdkSettings?: string | ClaudeSdkSettings;
   readonly environment?: NodeJS.ProcessEnv;
   readonly mcpServers?: ClaudeQueryOptions["mcpServers"];
+  /** Set instead of `mcpServers` when the agent reaches T3's tools through the terminal. */
+  readonly t3ToolsTerminal?: ClaudeT3ToolsTerminalOptions;
   readonly tools?: ClaudeAgentSdkQueryTools;
   readonly allowedTools?: ReadonlyArray<string>;
   readonly disallowedTools?: ReadonlyArray<string>;
@@ -1151,14 +1167,28 @@ export function makeClaudeQueryOptions(input: {
     ...(input.settings?.binaryPath
       ? { pathToClaudeCodeExecutable: input.settings.binaryPath }
       : {}),
-    ...(input.environment === undefined ? {} : { env: input.environment }),
+    ...(input.t3ToolsTerminal !== undefined
+      ? {
+          env: claudeT3ToolsTerminalEnvironment(
+            // The SDK hands the CLI process.env when `env` is unset.
+            input.environment ?? process.env,
+            input.t3ToolsTerminal,
+          ),
+        }
+      : input.environment === undefined
+        ? {}
+        : { env: input.environment }),
     ...(input.mcpServers === undefined ? {} : { mcpServers: input.mcpServers }),
     systemPrompt: {
       type: "preset" as const,
       preset: "claude_code" as const,
       append:
         buildRuntimeInstructions({ harness: "Claude Code" }) +
-        (input.mcpServers === undefined ? "" : T3_CODE_ORCHESTRATION_INSTRUCTIONS),
+        (input.mcpServers !== undefined
+          ? T3_CODE_ORCHESTRATION_INSTRUCTIONS
+          : input.t3ToolsTerminal !== undefined
+            ? T3_CODE_TERMINAL_ORCHESTRATION_INSTRUCTIONS
+            : ""),
     },
     ...(Object.keys(extraArgs).length === 0 ? {} : { extraArgs }),
   };
@@ -1209,18 +1239,100 @@ export const CLAUDE_T3_MCP_TOOL_TIMEOUT_MS = 65 * 60 * 1_000;
 // modes like `dontAsk` deny anything that is not pre-approved), but read-only sandboxes
 // pre-approve only the annotated read-only orchestrator tools so a read-only session cannot
 // silently spawn threads or scheduled tasks.
+//
+// Terminal transport is the opt-in exception for Claude Code installs whose
+// MCP policy rejects `t3-code`. It attaches no server. The agent runs the
+// `t3-mcp` shim through Bash instead, which calls T3's `acp-mcp-call` CLI with
+// the credential from the CLI's environment, where every command the agent
+// runs can read it. Read-only sandboxes have no Bash tool, so they get
+// neither the credential nor the T3 tools.
+
+/** What terminal T3 tools transport needs from the server that runs Claude. */
+export interface ClaudeT3ToolsTerminal {
+  /** How the agent's shell runs this install's CLI. */
+  readonly selfInvocation: SelfInvocation;
+  /** Directory holding the `t3-mcp` shim, put first on the agent's PATH. */
+  readonly binDirectory: string;
+  /** The host's PATH list separator. */
+  readonly pathDelimiter: ";" | ":";
+}
+
+/** One session's terminal transport: the T3 variables and where the shim lives. */
+export interface ClaudeT3ToolsTerminalOptions {
+  readonly environment: Readonly<Record<string, string>>;
+  readonly binDirectory: string;
+  readonly pathDelimiter: ";" | ":";
+}
+
+export const CLAUDE_T3_TERMINAL_BASH_RULE = "Bash(t3-mcp:*)";
+
+// Static and secret-free: the session's variables reach it through the
+// environment. Runs `acp-mcp-call` the way ACP agents run `acp-mcp-bridge`
+// (see selfInvocationArgs): Electron needs ELECTRON_RUN_AS_NODE, a script
+// install needs its entrypoint, and the standalone binary takes neither.
+export const CLAUDE_T3_MCP_SHIM = `#!/bin/sh
+: "\${T3_ACP_MCP_NODE:?t3-mcp only runs inside a T3 Code session}"
+export ELECTRON_RUN_AS_NODE=1
+exec "$T3_ACP_MCP_NODE" \${T3_ACP_MCP_ENTRYPOINT:+"$T3_ACP_MCP_ENTRYPOINT"} acp-mcp-call "$@"
+`;
+
+/**
+ * The CLI environment for terminal transport: the T3 variables, the shim's
+ * directory first on PATH, and a Bash timeout ceiling that fits T3's long
+ * wait calls unless the user already chose one.
+ */
+export function claudeT3ToolsTerminalEnvironment(
+  base: NodeJS.ProcessEnv,
+  terminal: ClaudeT3ToolsTerminalOptions,
+): NodeJS.ProcessEnv {
+  // Windows spells it Path; a second PATH key would be ambiguous.
+  const pathKey = Object.keys(base).find((key) => key.toUpperCase() === "PATH") ?? "PATH";
+  const basePath = base[pathKey];
+  return {
+    ...base,
+    ...terminal.environment,
+    [pathKey]:
+      basePath === undefined || basePath.length === 0
+        ? terminal.binDirectory
+        : `${terminal.binDirectory}${terminal.pathDelimiter}${basePath}`,
+    ...(base.BASH_MAX_TIMEOUT_MS === undefined
+      ? { BASH_MAX_TIMEOUT_MS: String(CLAUDE_T3_MCP_TOOL_TIMEOUT_MS) }
+      : {}),
+  };
+}
 
 export function claudeMcpQueryOverrides(input: {
   readonly mcpSession: McpProviderSession.McpProviderSessionConfig | undefined;
   readonly readOnlySandbox: boolean;
   readonly allowedTools?: ReadonlyArray<string>;
+  /** Set for terminal transport; unset attaches the MCP server. */
+  readonly terminal?: ClaudeT3ToolsTerminal;
 }): {
   readonly allowedTools?: ReadonlyArray<string>;
   readonly mcpServers?: ClaudeQueryOptions["mcpServers"];
+  readonly t3ToolsTerminal?: ClaudeT3ToolsTerminalOptions;
 } {
   const session = input.mcpSession;
-  if (session === undefined) {
+  if (session === undefined || (input.terminal !== undefined && input.readOnlySandbox)) {
     return input.allowedTools === undefined ? {} : { allowedTools: input.allowedTools };
+  }
+  if (input.terminal !== undefined) {
+    const self = input.terminal.selfInvocation;
+    return {
+      allowedTools: Array.from(
+        new Set([...(input.allowedTools ?? []), CLAUDE_T3_TERMINAL_BASH_RULE]),
+      ),
+      t3ToolsTerminal: {
+        binDirectory: input.terminal.binDirectory,
+        pathDelimiter: input.terminal.pathDelimiter,
+        environment: {
+          T3_ACP_MCP_ENDPOINT: session.endpoint,
+          T3_ACP_MCP_AUTHORIZATION: session.authorizationHeader,
+          T3_ACP_MCP_NODE: self.command,
+          ...(self.entrypoint === undefined ? {} : { T3_ACP_MCP_ENTRYPOINT: self.entrypoint }),
+        },
+      },
+    };
   }
   const mcpAllowedTools = input.readOnlySandbox
     ? CLAUDE_READ_ONLY_T3_MCP_ALLOWED_TOOLS
@@ -1874,6 +1986,7 @@ export function claudeEffectiveQueryPolicyKey(
   mcpOverrides: {
     readonly allowedTools?: ReadonlyArray<string>;
     readonly mcpServers?: ClaudeQueryOptions["mcpServers"];
+    readonly t3ToolsTerminal?: ClaudeT3ToolsTerminalOptions;
   },
 ): string {
   return JSON.stringify({
@@ -1883,7 +1996,10 @@ export function claudeEffectiveQueryPolicyKey(
         ? {}
         : { allowedTools: mcpOverrides.allowedTools }),
     }),
+    // Held in memory only, like the MCP header: a rotated credential must
+    // replace the process.
     mcpServers: mcpOverrides.mcpServers,
+    t3ToolsTerminal: mcpOverrides.t3ToolsTerminal,
   });
 }
 
@@ -3060,6 +3176,58 @@ interface ActiveClaudeToolCall {
   readonly ordinal: number;
   readonly startedAt: DateTime.Utc;
   readonly presentation?: ClaudeToolPresentation;
+  /** A Bash call to `t3-mcp`, shown as the T3 tool it calls. */
+  readonly t3Terminal?: true;
+}
+
+/**
+ * A Bash call that is exactly one terminal-transport T3 tool call, with its
+ * arguments fully parsed, renamed to the native MCP tool it stands for.
+ */
+function claudeT3TerminalToolCall(
+  toolName: string,
+  toolInput: ClaudeNativeToolInput,
+): { readonly toolName: string; readonly toolInput: ClaudeNativeToolInput } | undefined {
+  if (toolName !== "Bash") return undefined;
+  const command = inputRecordValue(toolInput, "command");
+  if (typeof command !== "string") return undefined;
+  const call = parseT3McpTerminalCommand(command, { wholeCommand: true });
+  if (call === undefined || !T3_MCP_TOOL_NAMES.has(call.tool)) return undefined;
+  if (call.hasArgs && call.input === undefined) return undefined;
+  return {
+    toolName: `mcp__t3-code__${call.tool}`,
+    toolInput: claudeNativeToolInputFromRecord(call.input ?? {}),
+  };
+}
+
+/**
+ * A terminal T3 tool call's result as the MCP result it carries: stdout only,
+ * or `{ error }` from the failed command, the shape ACP fallback calls use.
+ */
+function claudeT3TerminalToolResult(
+  output: ClaudeNativeToolOutput,
+  commandFailed: boolean,
+): { readonly output: ClaudeNativeToolOutput; readonly failed: boolean } {
+  if (commandFailed) {
+    return {
+      output: claudeNativeToolOutputFromStructuredResult({
+        structuredOutput: { error: claudeCommandOutputText(output).trim() },
+      }),
+      failed: true,
+    };
+  }
+  const value = claudeNativeToolOutputValue(output);
+  const structuredStdout =
+    typeof value === "object" && value !== null ? Reflect.get(value, "stdout") : undefined;
+  const stdout =
+    typeof structuredStdout === "string" ? structuredStdout : claudeNativeToolOutputText(output);
+  const result = parseT3McpTerminalOutput(stdout);
+  return {
+    output: claudeNativeToolOutputFromStructuredResult({
+      structuredOutput: result === undefined ? stdout : result.output,
+    }),
+    failed: result?.isError === true,
+  };
 }
 
 interface PendingClaudeSubagentLaunch {
@@ -3334,6 +3502,8 @@ export interface ClaudeAdapterV2Options {
   readonly crypto: Crypto.Crypto;
   readonly idAllocator: IdAllocator.IdAllocatorV2["Service"];
   readonly queryRunner: ClaudeAgentSdkQueryRunnerShape;
+  /** Required when `settings.t3ToolsTransport` is "terminal"; createClaudeAdapterV2 always sets it. */
+  readonly t3ToolsTerminal?: ClaudeT3ToolsTerminal;
   readonly scopedLimitNames?: Ref.Ref<ClaudeScopedLimitNames>;
   readonly onUsageLimits?: ManagedServerProvider["applyUsageLimits"];
   readonly continuationRequests?: {
@@ -3355,6 +3525,28 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
   const continuationRequests = adapterOptions.continuationRequests ?? {
     offer: () => Effect.void,
   };
+
+  // Rewritten before every terminal-transport launch so an upgrade or a
+  // deleted file heals itself. The rename keeps a concurrent launch from
+  // running a half-written script.
+  const writeClaudeT3McpShim = (binDirectory: string) =>
+    Effect.gen(function* () {
+      const target = path.join(binDirectory, "t3-mcp");
+      const staged = `${target}.${yield* crypto.randomUUIDv4()}.tmp`;
+      yield* fileSystem.makeDirectory(binDirectory, { recursive: true });
+      yield* fileSystem.writeFileString(staged, CLAUDE_T3_MCP_SHIM);
+      yield* fileSystem.chmod(staged, 0o755);
+      yield* fileSystem.rename(staged, target);
+    }).pipe(
+      Effect.mapError(
+        (cause) =>
+          new ProviderAdapter.ProviderAdapterProtocolError({
+            driver: CLAUDE_PROVIDER,
+            detail: `Could not write the t3-mcp command to ${binDirectory}`,
+            cause,
+          }),
+      ),
+    );
 
   const userInvocableSkillNames = (cwd: string | null) =>
     discoverClaudeSkills(
@@ -5318,7 +5510,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
         const toolCallsFor = (context: ActiveClaudeTurnContext, toolCall: ActiveClaudeToolCall) =>
           toolCall.runId === null ? subagentToolCalls : context.toolCalls;
 
-        const ensureToolCallStarted = Effect.fnUntraced(function* (input: {
+        const ensureToolCallStarted = Effect.fnUntraced(function* (reported: {
           readonly context: ActiveClaudeTurnContext;
           readonly nativeItemId: string;
           readonly toolName: string;
@@ -5326,6 +5518,15 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           readonly parentToolUseId: string | null;
           readonly presentation?: ClaudeToolPresentation | undefined;
         }) {
+          const t3Terminal = claudeT3TerminalToolCall(reported.toolName, reported.toolInput);
+          const input =
+            t3Terminal === undefined
+              ? reported
+              : {
+                  ...reported,
+                  ...t3Terminal,
+                  presentation: mcpToolPresentation({ toolName: t3Terminal.toolName }),
+                };
           const existing = findToolCall(input.context, input.nativeItemId);
           if (existing !== undefined) {
             // The permission callback can start a call before its assistant
@@ -5383,6 +5584,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             ordinal,
             startedAt,
             ...(input.presentation === undefined ? {} : { presentation: input.presentation }),
+            ...(t3Terminal === undefined ? {} : { t3Terminal: true }),
           };
           toolCallsFor(input.context, toolCall).set(input.nativeItemId, toolCall);
           yield* emitToolCallArtifacts(
@@ -7248,6 +7450,10 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               message,
               toolResult.tool_use_id,
             );
+            const t3TerminalResult =
+              toolCall.t3Terminal === true
+                ? claudeT3TerminalToolResult(output, isClaudeToolResultError(toolResult))
+                : undefined;
             const artifacts = buildToolCallArtifacts({
               context,
               nativeItemId: toolCall.nativeItemId,
@@ -7259,11 +7465,11 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               rootNodeId: toolCall.rootNodeId,
               parentNodeId: toolCall.parentNodeId,
               ordinal: toolCall.ordinal,
-              output,
+              output: t3TerminalResult?.output ?? output,
               status:
                 toolNonExecutionKind === "cancelled"
                   ? "cancelled"
-                  : isClaudeToolResultError(toolResult)
+                  : (t3TerminalResult?.failed ?? isClaudeToolResultError(toolResult))
                     ? "failed"
                     : "completed",
               ...(toolNonExecutionKind === undefined ? {} : { toolNonExecutionKind }),
@@ -8014,10 +8220,21 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           nativeThreadId: string,
         ) {
           const queryPolicy = claudeRuntimeQueryPolicyForRuntimePolicy(turnInput.runtimePolicy);
+          const terminal =
+            adapterOptions.settings.t3ToolsTransport === "terminal"
+              ? adapterOptions.t3ToolsTerminal
+              : undefined;
+          if (adapterOptions.settings.t3ToolsTransport === "terminal" && terminal === undefined) {
+            return yield* new ProviderAdapter.ProviderAdapterProtocolError({
+              driver: CLAUDE_PROVIDER,
+              detail: "Terminal T3 tools transport has no way to run the T3 CLI",
+            });
+          }
           const mcpOverrides = claudeMcpQueryOverrides({
             mcpSession: yield* mcpSessions.read(turnInput.threadId),
             readOnlySandbox:
               sandboxPolicyKindForClaudeRuntimePolicy(turnInput.runtimePolicy) === "readOnly",
+            ...(terminal === undefined ? {} : { terminal }),
             ...(queryPolicy.allowedTools === undefined
               ? {}
               : { allowedTools: queryPolicy.allowedTools }),
@@ -8084,6 +8301,9 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             return yield* new ClaudeBackgroundWorkBlocksQueryReplacementError();
           }
 
+          if (mcpOverrides.t3ToolsTerminal !== undefined) {
+            yield* writeClaudeT3McpShim(mcpOverrides.t3ToolsTerminal.binDirectory);
+          }
           const closedExistingNativeThreadId = existing !== null ? existing.nativeThreadId : null;
           if (existing !== null) {
             yield* existing.query.close.pipe(Effect.ignore);
@@ -8119,6 +8339,9 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             ...(mcpOverrides.mcpServers === undefined
               ? {}
               : { mcpServers: mcpOverrides.mcpServers }),
+            ...(mcpOverrides.t3ToolsTerminal === undefined
+              ? {}
+              : { t3ToolsTerminal: mcpOverrides.t3ToolsTerminal }),
             permissionMode: queryPolicy.permissionMode,
             ...(queryPolicy.allowDangerouslySkipPermissions === undefined
               ? {}
@@ -9148,6 +9371,11 @@ export const createClaudeAdapterV2 = Effect.fn("ClaudeAdapterV2Driver.create")(
       expandHomePath(config.binaryPath, yield* HostProcess.HomeDirectory),
       claudeEnvironment,
     );
+    const t3ToolsTerminal: ClaudeT3ToolsTerminal = {
+      selfInvocation: yield* resolveSelfInvocation(),
+      binDirectory: path.join(serverConfig.stateDir, "bin"),
+      pathDelimiter: (yield* HostProcess.Platform) === "win32" ? ";" : ":",
+    };
     return yield* makeClaudeAdapterV2({
       instanceId,
       settings: { ...config, enabled, binaryPath },
@@ -9158,6 +9386,7 @@ export const createClaudeAdapterV2 = Effect.fn("ClaudeAdapterV2Driver.create")(
       crypto,
       idAllocator,
       queryRunner,
+      t3ToolsTerminal,
       continuationRequests,
       ...hooks,
     });

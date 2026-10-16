@@ -11,6 +11,7 @@ import {
   mergeToolActivityData,
 } from "@t3tools/shared/toolActivity";
 import { T3_MCP_TOOL_NAMES } from "@t3tools/shared/t3McpToolPresentation";
+import { parseT3McpTerminalCommand } from "@t3tools/provider-core/server/t3McpTerminalCall";
 import type {
   OrchestrationV2ProviderThreadNativeMetadata,
   ThreadTokenUsageSnapshot,
@@ -1023,28 +1024,6 @@ export interface AcpMcpToolCallIdentity {
   readonly input?: Record<string, unknown>;
 }
 
-const ACP_MCP_FALLBACK_CALL = /(?:^|[\s"'=])acp-mcp-call[\s"']+([A-Za-z0-9_.-]+)(?:\s+(.+?))?\s*$/u;
-
-function acpMcpFallbackInput(value: string | undefined): Record<string, unknown> | undefined {
-  if (value === undefined) return undefined;
-  const trimmed = value.trim();
-  const candidates = [
-    trimmed,
-    ...(trimmed.startsWith("'") && trimmed.endsWith("'") ? [trimmed.slice(1, -1)] : []),
-  ];
-  for (const candidate of candidates) {
-    try {
-      const parsed: unknown = JSON.parse(candidate);
-      const unwrapped = typeof parsed === "string" ? JSON.parse(parsed) : parsed;
-      if (isRecord(unwrapped)) return unwrapped;
-    } catch {
-      // ACP agents choose their own shell quoting. An unrecognized form keeps
-      // the MCP identity but leaves the input empty instead of misreporting it.
-    }
-  }
-  return undefined;
-}
-
 /**
  * T3 always injects its server as "t3-code", and matches are additionally gated on the known T3
  * tool inventory, so the separator match can stay loose.
@@ -1150,10 +1129,13 @@ export function extractMcpToolCallIdentity(
     ...(options?.embeddedTerminalCommands ?? []),
   ];
   for (const command of commands) {
-    const match = ACP_MCP_FALLBACK_CALL.exec(command);
-    if (match?.[1] !== undefined) {
-      const input = acpMcpFallbackInput(match[2]);
-      return { server: "t3-code", tool: match[1], ...(input === undefined ? {} : { input }) };
+    const call = parseT3McpTerminalCommand(command);
+    if (call !== undefined) {
+      return {
+        server: "t3-code",
+        tool: call.tool,
+        ...(call.input === undefined ? {} : { input: call.input }),
+      };
     }
   }
   return undefined;

@@ -1,6 +1,8 @@
 // @effect-diagnostics nodeBuiltinImport:off -- workflow fixtures use files and the fake Claude CLI uses Node streams
+import * as NodeChildProcess from "node:child_process";
 import * as NodeEvents from "node:events";
 import * as NodeFS from "node:fs";
+import * as NodeHttp from "node:http";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as NodeStream from "node:stream";
@@ -73,6 +75,7 @@ import { SpawnExecutableResolution } from "@t3tools/shared/shell";
 import { attachmentRelativePath } from "../../attachmentStore.ts";
 import * as ServerConfig from "../../config.ts";
 import * as McpProviderSession from "@t3tools/provider-core/server/mcpSession";
+import { parseT3McpTerminalOutput } from "@t3tools/provider-core/server/t3McpTerminalCall";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
 import { PreviewControlsToolkit } from "../../mcp/toolkits/previewControls/tools.ts";
 import { HtmlToolkit } from "../../mcp/toolkits/html/tools.ts";
@@ -101,6 +104,9 @@ import {
 } from "../testkit/fixtures/shared.ts";
 
 const DEFAULT_CLAUDE_SETTINGS = Schema.decodeSync(ClaudeSettings)({});
+const TERMINAL_TOOLS_CLAUDE_SETTINGS = Schema.decodeSync(ClaudeSettings)({
+  t3ToolsTransport: "terminal",
+});
 const AUTO_COMPACT_CLAUDE_SETTINGS = Schema.decodeSync(ClaudeSettings)({
   autoCompactWindow: "300000",
 });
@@ -686,6 +692,128 @@ describe("ClaudeAdapterV2 MCP query overrides", () => {
       }),
     );
     assert.notEqual(rotatedKey, initialKey);
+  });
+
+  const T3_TOOLS_TERMINAL = {
+    selfInvocation: { command: "/opt/t3/node", entrypoint: "/opt/t3/bin.mjs" },
+    binDirectory: "/t3/userdata/bin",
+    pathDelimiter: ":",
+  } as const;
+
+  it("hands terminal transport the credential through the environment instead of a server", () => {
+    const threadId = ThreadId.make("thread-claude-mcp-terminal");
+    const overrides = ClaudeAdapterV2.claudeMcpQueryOverrides({
+      mcpSession: mcpSessionFor(threadId),
+      readOnlySandbox: false,
+      allowedTools: ["Read"],
+      terminal: T3_TOOLS_TERMINAL,
+    });
+
+    assert.deepEqual(overrides, {
+      allowedTools: ["Read", "Bash(t3-mcp:*)"],
+      t3ToolsTerminal: {
+        binDirectory: "/t3/userdata/bin",
+        pathDelimiter: ":",
+        environment: {
+          T3_ACP_MCP_ENDPOINT: "http://127.0.0.1:43123/mcp",
+          T3_ACP_MCP_AUTHORIZATION: "Bearer secret-claude-token",
+          T3_ACP_MCP_NODE: "/opt/t3/node",
+          T3_ACP_MCP_ENTRYPOINT: "/opt/t3/bin.mjs",
+        },
+      },
+    });
+  });
+
+  it("gives a read-only sandbox neither the T3 credential nor Bash on terminal transport", () => {
+    const overrides = ClaudeAdapterV2.claudeMcpQueryOverrides({
+      mcpSession: mcpSessionFor(ThreadId.make("thread-claude-mcp-terminal-read-only")),
+      readOnlySandbox: true,
+      allowedTools: ["Read", "Glob", "Grep"],
+      terminal: T3_TOOLS_TERMINAL,
+    });
+
+    assert.deepEqual(overrides, { allowedTools: ["Read", "Glob", "Grep"] });
+  });
+
+  it("invalidates live-query reuse when terminal credentials rotate", () => {
+    const threadId = ThreadId.make("thread-claude-mcp-terminal-rotation");
+    const queryPolicy = ClaudeAdapterV2.claudeRuntimeQueryPolicyForRuntimePolicy(
+      ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
+        runtimeMode: "approval-required",
+        interactionMode: "default",
+        cwd: "/workspace",
+      }),
+    );
+    const keyFor = (authorizationHeader: string) =>
+      ClaudeAdapterV2.claudeEffectiveQueryPolicyKey(
+        queryPolicy,
+        ClaudeAdapterV2.claudeMcpQueryOverrides({
+          mcpSession: mcpSessionFor(threadId, authorizationHeader),
+          readOnlySandbox: false,
+          terminal: T3_TOOLS_TERMINAL,
+        }),
+      );
+
+    assert.notEqual(keyFor("Bearer rotated-claude-token"), keyFor("Bearer secret-claude-token"));
+  });
+
+  it("puts the t3-mcp shim on PATH and raises the Bash timeout ceiling for terminal transport", () => {
+    const optionsFor = (environment: NodeJS.ProcessEnv) =>
+      ClaudeAdapterV2.makeClaudeQueryOptions({
+        modelSelection: CLAUDE_TEST_MODEL_SELECTION,
+        nativeThreadId: "native-thread-claude-terminal-env",
+        resume: false,
+        cwd: null,
+        environment,
+        t3ToolsTerminal: {
+          binDirectory: "/t3/userdata/bin",
+          pathDelimiter: ":",
+          environment: { T3_ACP_MCP_AUTHORIZATION: "Bearer secret-claude-token" },
+        },
+      });
+
+    const options = optionsFor({ PATH: "/usr/bin", HOME: "/home/me" });
+    assert.isUndefined(options.mcpServers);
+    assert.deepEqual(options.env, {
+      PATH: "/t3/userdata/bin:/usr/bin",
+      HOME: "/home/me",
+      T3_ACP_MCP_AUTHORIZATION: "Bearer secret-claude-token",
+      BASH_MAX_TIMEOUT_MS: String(ClaudeAdapterV2.CLAUDE_T3_MCP_TOOL_TIMEOUT_MS),
+    });
+    assert.equal(
+      optionsFor({ PATH: "/usr/bin", BASH_MAX_TIMEOUT_MS: "1000" }).env?.BASH_MAX_TIMEOUT_MS,
+      "1000",
+    );
+  });
+
+  it("swaps the orchestration instructions for t3-mcp calling instructions", () => {
+    const append = (input: { mcp?: boolean; terminal?: boolean }) => {
+      const prompt = ClaudeAdapterV2.makeClaudeQueryOptions({
+        modelSelection: CLAUDE_TEST_MODEL_SELECTION,
+        nativeThreadId: "native-thread-claude-terminal-prompt",
+        resume: false,
+        cwd: null,
+        ...(input.mcp ? { mcpServers: { "t3-code": T3_MCP_SERVERS["t3-code"] } } : {}),
+        ...(input.terminal
+          ? {
+              t3ToolsTerminal: {
+                binDirectory: "/t3/userdata/bin",
+                pathDelimiter: ":",
+                environment: {},
+              },
+            }
+          : {}),
+      }).systemPrompt;
+      assert(typeof prompt === "object" && prompt !== null && "append" in prompt);
+      return prompt.append ?? "";
+    };
+
+    assert.include(append({ terminal: true }), "t3-mcp <tool> '<json>'");
+    assert.include(append({ terminal: true }), "## T3 Code orchestration");
+    assert.notInclude(append({ terminal: true }), "ACP fallback");
+    assert.notInclude(append({ mcp: true }), "t3-mcp");
+    assert.notInclude(append({ mcp: true }), "ACP fallback");
+    assert.notInclude(append({}), "## T3 Code orchestration");
   });
 
   it("matches the read-only allowlist to the orchestrator toolkit annotations", () => {
@@ -2033,6 +2161,56 @@ describe("ClaudeAdapterV2 MCP credential channel", () => {
     }),
   );
 
+  it.effect("launches terminal transport with the T3 tool variables and no MCP server", () =>
+    Effect.gen(function* () {
+      const cli = makeFakeClaudeCli();
+      const runner = yield* ClaudeAdapterV2.ClaudeAgentSdkQueryRunner;
+      const session = yield* runner.open({
+        threadId: ThreadId.make("thread-claude-terminal-channel"),
+        providerSessionId: ProviderSessionId.make("provider-session-claude-terminal-channel"),
+        options: {
+          ...ClaudeAdapterV2.makeClaudeQueryOptions({
+            modelSelection: CLAUDE_TEST_MODEL_SELECTION,
+            nativeThreadId: "native-thread-claude-terminal-channel",
+            resume: false,
+            cwd: null,
+            environment: { PATH: "/usr/bin" },
+            t3ToolsTerminal: {
+              binDirectory: "/t3/userdata/bin",
+              pathDelimiter: ":",
+              environment: {
+                T3_ACP_MCP_ENDPOINT: "http://127.0.0.1:43123/mcp",
+                T3_ACP_MCP_AUTHORIZATION: "Bearer dummy-mcp-credential",
+                T3_ACP_MCP_NODE: "/opt/t3/node",
+              },
+            },
+          }),
+          pathToClaudeCodeExecutable: "/opt/claude/cli.js",
+          spawnClaudeCodeProcess: cli.spawn,
+        },
+      });
+      yield* session.close;
+
+      assert.isFalse(
+        cli.controlRequests.some(
+          (request) => "subtype" in request && request.subtype === "mcp_set_servers",
+        ),
+      );
+      assert.include(cli.spawns[0]?.env, {
+        T3_ACP_MCP_AUTHORIZATION: "Bearer dummy-mcp-credential",
+        T3_ACP_MCP_NODE: "/opt/t3/node",
+      });
+      assert.notInclude(JSON.stringify(cli.spawns[0]?.args), "dummy-mcp-credential");
+    }).pipe(
+      Effect.provide(ClaudeAdapterV2.layerQueryRunner),
+      Effect.provideService(
+        ProviderEventLoggers.ProviderEventLoggers,
+        ProviderEventLoggers.NoOpProviderEventLoggers,
+      ),
+      Effect.provide(NodeServices.layer),
+    ),
+  );
+
   it.effect("closes the CLI when it never answers the MCP registration", () =>
     Effect.gen(function* () {
       const cli = makeFakeClaudeCli(false);
@@ -2043,6 +2221,79 @@ describe("ClaudeAdapterV2 MCP credential channel", () => {
       assert.equal(opened._tag, "Failure");
       assert.isTrue(cli.closed());
     }),
+  );
+});
+
+describe("ClaudeAdapterV2 t3-mcp shim", () => {
+  it.skipIf(HostProcess.Platform.defaultValue() === "win32")(
+    "calls a T3 tool through acp-mcp-call with the session's credential",
+    async () => {
+      const requests: Array<{
+        authorization?: string;
+        body: { method?: string; id?: unknown; params?: unknown };
+      }> = [];
+      const server = NodeHttp.createServer((request, response) => {
+        let raw = "";
+        request.on("data", (chunk: Buffer) => (raw += chunk.toString("utf8")));
+        request.on("end", () => {
+          const body = JSON.parse(raw) as { method?: string; id?: unknown; params?: unknown };
+          requests.push({
+            ...(request.headers.authorization === undefined
+              ? {}
+              : { authorization: request.headers.authorization }),
+            body,
+          });
+          if (body.id === undefined) {
+            response.writeHead(202).end();
+            return;
+          }
+          const result =
+            body.method === "initialize"
+              ? { protocolVersion: "2025-06-18", capabilities: {}, serverInfo: { name: "fake" } }
+              : { content: [{ type: "text", text: "ok" }], structuredContent: { status: "done" } };
+          response
+            .writeHead(200, { "content-type": "application/json" })
+            .end(JSON.stringify({ jsonrpc: "2.0", id: body.id, result }));
+        });
+      });
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+      const binDirectory = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-mcp-shim-"));
+      try {
+        const shim = NodePath.join(binDirectory, "t3-mcp");
+        NodeFS.writeFileSync(shim, ClaudeAdapterV2.CLAUDE_T3_MCP_SHIM, { mode: 0o755 });
+        const address = server.address();
+        assert(typeof address === "object" && address !== null);
+        const child = NodeChildProcess.spawn(shim, ["task_status", '{"taskId":"task-1"}'], {
+          env: {
+            PATH: process.env.PATH,
+            T3_ACP_MCP_ENDPOINT: `http://127.0.0.1:${address.port}/mcp`,
+            T3_ACP_MCP_AUTHORIZATION: "Bearer shim-token",
+            T3_ACP_MCP_NODE: process.execPath,
+            T3_ACP_MCP_ENTRYPOINT: NodePath.resolve(import.meta.dirname, "../../bin.ts"),
+          },
+        });
+        let stdout = "";
+        let stderr = "";
+        child.stdout.on("data", (chunk: Buffer) => (stdout += chunk.toString("utf8")));
+        child.stderr.on("data", (chunk: Buffer) => (stderr += chunk.toString("utf8")));
+        const code = await new Promise<number | null>((resolve) => child.on("exit", resolve));
+
+        assert.equal(code, 0, stderr);
+        assert.deepEqual(parseT3McpTerminalOutput(stdout), {
+          output: { status: "done" },
+          isError: false,
+        });
+        const call = requests.find((entry) => entry.body.method === "tools/call");
+        assert.equal(call?.authorization, "Bearer shim-token");
+        assert.deepInclude(call?.body, {
+          params: { name: "task_status", arguments: { taskId: "task-1" } },
+        });
+      } finally {
+        server.close();
+        NodeFS.rmSync(binDirectory, { recursive: true, force: true });
+      }
+    },
+    30_000,
   );
 });
 
@@ -2342,6 +2593,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
     readonly subagentLaunchToolUseId?: string;
     readonly nativeSessionId?: string;
     readonly settings?: ClaudeSettings;
+    readonly t3ToolsTerminal?: ClaudeAdapterV2.ClaudeT3ToolsTerminal;
     readonly freshQueueOnReopen?: boolean;
   }) =>
     Effect.gen(function* () {
@@ -2387,6 +2639,9 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         instanceId: ClaudeAdapterV2.CLAUDE_DEFAULT_INSTANCE_ID,
         settings: options?.settings ?? DEFAULT_CLAUDE_SETTINGS,
         environment: options?.environment ?? {},
+        ...(options?.t3ToolsTerminal === undefined
+          ? {}
+          : { t3ToolsTerminal: options.t3ToolsTerminal }),
         attachmentsDir,
         fileSystem,
         path: yield* Path.Path,
@@ -2534,6 +2789,66 @@ describe("ClaudeAdapterV2 background wake turns", () => {
       };
     });
   const makeWakeHarness = makeWakeHarnessWithOptions();
+
+  it.effect("writes the t3-mcp shim and launches Claude with it in terminal transport", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const binDirectory = yield* fileSystem.makeTempDirectoryScoped({
+          prefix: "t3-claude-v2-bin-",
+        });
+        const harness = yield* makeWakeHarnessWithOptions({
+          settings: TERMINAL_TOOLS_CLAUDE_SETTINGS,
+          environment: { PATH: "/usr/bin" },
+          t3ToolsTerminal: {
+            selfInvocation: { command: "/opt/t3/node", entrypoint: "/opt/t3/bin.mjs" },
+            binDirectory,
+            pathDelimiter: ":",
+          },
+        });
+        const mcpSessions = yield* McpProviderSessions.McpProviderSessions;
+        yield* mcpSessions.set({
+          environmentId: EnvironmentId.make("environment-claude-terminal"),
+          threadId: harness.threadId,
+          providerSessionId: "mcp-session-claude-terminal",
+          providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+          endpoint: "http://127.0.0.1:43123/mcp",
+          authorizationHeader: "Bearer terminal-claude-token",
+          browserToolsAvailable: true,
+        });
+        yield* harness.runtime.startTurn(
+          makeClaudeTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now: yield* DateTime.now,
+            attemptId: RunAttemptId.make("attempt-claude-terminal-transport"),
+            text: "Delegate this.",
+            attachments: [],
+          }),
+        );
+
+        const shimPath = `${binDirectory}/t3-mcp`;
+        assert.equal(
+          yield* fileSystem.readFileString(shimPath),
+          ClaudeAdapterV2.CLAUDE_T3_MCP_SHIM,
+        );
+        assert.equal((yield* fileSystem.stat(shimPath)).mode & 0o777, 0o755);
+        const opened = harness.getOpenedOptions();
+        assert.notProperty(opened, "mcpServers");
+        assert.include(opened?.allowedTools ?? [], ClaudeAdapterV2.CLAUDE_T3_TERMINAL_BASH_RULE);
+        assert.include(opened?.env, {
+          PATH: `${binDirectory}:/usr/bin`,
+          T3_ACP_MCP_AUTHORIZATION: "Bearer terminal-claude-token",
+          T3_ACP_MCP_NODE: "/opt/t3/node",
+          T3_ACP_MCP_ENTRYPOINT: "/opt/t3/bin.mjs",
+        });
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        ),
+      ),
+    ),
+  );
 
   it.effect.each([
     { isError: false, title: "Check weather" },
@@ -5839,6 +6154,151 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         ),
       ),
     ),
+  );
+
+  // Runs one Bash call through a turn and returns its last projected item.
+  const projectBashCall = (input: {
+    readonly id: string;
+    readonly command: string;
+    readonly isError?: boolean;
+    readonly stdout: string;
+    readonly stderr?: string;
+  }) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const harness = yield* makeWakeHarness;
+        const now = yield* DateTime.now;
+        const toolUseId = `toolu_${input.id}`;
+        yield* harness.runtime.startTurn(
+          makeClaudeTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now,
+            attemptId: RunAttemptId.make(`attempt-claude-${input.id}`),
+            text: "Run it.",
+            attachments: [],
+          }),
+        );
+        yield* Queue.offer(
+          harness.sdkMessages,
+          claudeSdkFrame({
+            type: "assistant",
+            message: {
+              model: "claude-sonnet-4-6",
+              id: `msg_${input.id}`,
+              type: "message",
+              role: "assistant",
+              content: [
+                {
+                  type: "tool_use",
+                  id: toolUseId,
+                  name: "Bash",
+                  input: { command: input.command },
+                },
+              ],
+            },
+            parent_tool_use_id: null,
+            uuid: "00000000-0000-4000-8000-000000000890",
+            session_id: WAKE_NATIVE_SESSION,
+          }),
+        );
+        yield* Queue.offer(
+          harness.sdkMessages,
+          claudeSdkFrame({
+            type: "user",
+            message: {
+              role: "user",
+              content: [
+                {
+                  type: "tool_result",
+                  tool_use_id: toolUseId,
+                  content: [input.stdout, input.stderr ?? ""].join("\n").trim(),
+                  ...(input.isError === true ? { is_error: true } : {}),
+                },
+              ],
+            },
+            parent_tool_use_id: null,
+            uuid: "00000000-0000-4000-8000-000000000891",
+            session_id: WAKE_NATIVE_SESSION,
+            tool_use_result: {
+              stdout: input.stdout,
+              stderr: input.stderr ?? "",
+              interrupted: false,
+              isImage: false,
+            },
+          }),
+        );
+        yield* Queue.offer(
+          harness.sdkMessages,
+          makeResultFrame({ uuid: "00000000-0000-4000-8000-000000000892", result: "Done." }),
+        );
+        yield* awaitUntil(() => harness.terminalEvents().length === 1, "turn terminal");
+        const event = harness.events.findLast(
+          (candidate) =>
+            candidate.type === "turn_item.updated" &&
+            candidate.turnItem.nativeItemRef?.nativeId === toolUseId,
+        );
+        return event?.type === "turn_item.updated" ? event.turnItem : undefined;
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        ),
+      ),
+    );
+
+  it.effect("shows a t3-mcp Bash call as the T3 tool it calls, with stdout as its result", () =>
+    Effect.gen(function* () {
+      const item = yield* projectBashCall({
+        id: "T3McpSuccess",
+        command: `t3-mcp task_status '{"taskId":"task-1"}'`,
+        stdout: JSON.stringify({
+          content: [{ type: "text", text: "running" }],
+          structuredContent: { status: "running" },
+        }),
+        stderr: "warning: noise",
+      });
+      assert.equal(item?.type, "dynamic_tool");
+      assert.equal(item?.status, "completed");
+      if (item?.type !== "dynamic_tool") return;
+      assert.equal(item.toolName, "mcp__t3-code__task_status");
+      assert.deepEqual(item.input, { taskId: "task-1" });
+      assert.deepEqual(item.output, { status: "running" });
+    }),
+  );
+
+  it.effect("fails a t3-mcp Bash call whose command failed, with its error text", () =>
+    Effect.gen(function* () {
+      const item = yield* projectBashCall({
+        id: "T3McpFailure",
+        command: `t3-mcp task_status '{"taskId":"task-1"}'`,
+        isError: true,
+        stdout: "",
+        stderr: "T3 Code MCP endpoint responded with HTTP 401.",
+      });
+      assert.equal(item?.status, "failed");
+      if (item?.type !== "dynamic_tool") return assert.fail("expected a T3 tool item");
+      assert.equal(item.toolName, "mcp__t3-code__task_status");
+      assert.deepEqual(item.output, { error: "T3 Code MCP endpoint responded with HTTP 401." });
+    }),
+  );
+
+  it.effect("keeps plain and piped Bash commands as commands", () =>
+    Effect.gen(function* () {
+      const plain = yield* projectBashCall({ id: "PlainBash", command: "ls", stdout: "a" });
+      assert.equal(plain?.type, "command_execution");
+      const piped = yield* projectBashCall({
+        id: "PipedT3Mcp",
+        command: `t3-mcp task_status '{"taskId":"task-1"}' | jq .`,
+        stdout: "{}",
+      });
+      assert.equal(piped?.type, "command_execution");
+      const chained = yield* projectBashCall({
+        id: "ChainedT3Mcp",
+        command: `cd /tmp && t3-mcp task_status '{"taskId":"task-1"}'`,
+        stdout: "{}",
+      });
+      assert.equal(chained?.type, "command_execution");
+    }),
   );
 
   it.effect("answers an approval a held wake turn raises without waiting for the echo", () =>

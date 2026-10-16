@@ -76,6 +76,16 @@ can still be started by you. Invoke those one per message: Claude directly runs
 only the last named skill and may try to start earlier ones through its Skill
 tool, which refuses skills reserved for manual invocation.
 
+## T3 tools when MCP is blocked
+
+Claude gets T3 Code's orchestration tools, like delegating work to other models,
+from an MCP server named `t3-code`. If your organization's Claude Code MCP
+allowlist blocks it, set **T3 tools** to **Terminal** in the Claude provider
+settings, and Claude calls the same tools with a `t3-mcp` command in its Bash
+tool. Any command Claude runs in that session can read the session's T3 Code
+token, so stay on **MCP server** unless the allowlist is the problem. Read-only
+sessions have no Bash tool, so they get no T3 tools in Terminal mode.
+
 ## OpenRouter
 
 Create a Claude instance with its own config directory, such as

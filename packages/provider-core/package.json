@@ -151,6 +151,10 @@
       "types": "./src/server/subagentProjection.ts",
       "import": "./src/server/subagentProjection.ts"
     },
+    "./server/t3McpTerminalCall": {
+      "types": "./src/server/t3McpTerminalCall.ts",
+      "import": "./src/server/t3McpTerminalCall.ts"
+    },
     "./server/textGeneration": {
       "types": "./src/server/textGeneration.ts",
       "import": "./src/server/textGeneration.ts"
