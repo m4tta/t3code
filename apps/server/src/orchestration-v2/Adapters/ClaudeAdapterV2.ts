@@ -574,6 +574,17 @@ export class ClaudeAppendSystemPromptMissingValueError extends Schema.TaggedErro
   }
 }
 
+export class ClaudePermissionModeRefusedError extends Schema.TaggedError<ClaudePermissionModeRefusedError>()(
+  "ClaudePermissionModeRefusedError",
+  {
+    effective: Schema.String,
+  },
+) {
+  override get message(): string {
+    return `Claude Code refused full access for this thread and opened in "${this.effective}" instead. Your Claude settings or organization policy may not allow it. Choose another access mode for this thread, then send the message again.`;
+  }
+}
+
 export interface ClaudeAgentSdkQueryRunnerShape {
   readonly allocateSessionId: Effect.Effect<string, ClaudeAgentSdkQueryRunnerError>;
   readonly open: (
@@ -9815,11 +9826,33 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               ),
             ),
           };
+          // A delegated child runs in whatever mode Claude allows, so a parent
+          // with full access can still delegate to a Claude that refuses it. A
+          // thread the user started must not quietly lose full access.
+          const refusesFullAccessFallback =
+            queryOptions.permissionMode === "bypassPermissions" &&
+            turnInput.appThread.lineage.relationshipToParent !== "subagent";
           yield* Ref.set(queryContext, context);
           yield* querySession.messages.pipe(
             Stream.runForEach((message) =>
               sdkMessageLock.withPermits(1)(
                 Effect.suspend(() => {
+                  if (
+                    message.type === "system" &&
+                    message.subtype === "init" &&
+                    !context.receivedInit &&
+                    refusesFullAccessFallback &&
+                    message.permissionMode !== undefined &&
+                    message.permissionMode !== "bypassPermissions"
+                  ) {
+                    const refused = new ClaudePermissionModeRefusedError({
+                      effective: message.permissionMode,
+                    });
+                    return querySession.close.pipe(
+                      Effect.ignore,
+                      Effect.andThen(Effect.fail(queryRunnerError(refused, "init"))),
+                    );
+                  }
                   if (
                     message.type === "system" &&
                     message.subtype === "init" &&
