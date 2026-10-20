@@ -153,6 +153,7 @@ function makeClaudeTestAppThread(input: {
   readonly threadId: ThreadId;
   readonly providerThread: OrchestrationV2ProviderThread;
   readonly now: DateTime.Utc;
+  readonly delegatedFrom?: ThreadId;
 }): OrchestrationV2AppThread {
   return {
     createdBy: "user",
@@ -167,11 +168,14 @@ function makeClaudeTestAppThread(input: {
     branch: null,
     worktreePath: null,
     activeProviderThreadId: input.providerThread.id,
-    lineage: {
-      parentThreadId: null,
-      relationshipToParent: null,
-      rootThreadId: input.threadId,
-    },
+    lineage:
+      input.delegatedFrom === undefined
+        ? { parentThreadId: null, relationshipToParent: null, rootThreadId: input.threadId }
+        : {
+            parentThreadId: input.delegatedFrom,
+            relationshipToParent: "subagent",
+            rootThreadId: input.delegatedFrom,
+          },
     forkedFrom: null,
     createdAt: input.now,
     updatedAt: input.now,
@@ -196,6 +200,7 @@ function makeClaudeTestTurnInput(input: {
   readonly messageCreationSource?: ProviderAdapter.ProviderAdapterV2TurnInput["message"]["creationSource"];
   readonly modelSelection?: ModelSelection;
   readonly runtimePolicy?: ProviderAdapter.ProviderAdapterV2RuntimePolicy;
+  readonly delegatedFrom?: ThreadId;
 }): ProviderAdapter.ProviderAdapterV2TurnInput {
   return {
     appThread: makeClaudeTestAppThread(input),
@@ -5278,6 +5283,85 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
         ),
       ),
+  );
+
+  it.effect("fails a top-level thread's turn when Claude refuses full access", () =>
+    Effect.gen(function* () {
+      let closes = 0;
+      const harness = yield* makeWakeHarnessWithOptions({
+        close: () =>
+          Effect.sync(() => {
+            closes += 1;
+          }),
+      });
+      yield* harness.runtime.startTurn(
+        makeClaudeTestTurnInput({
+          threadId: harness.threadId,
+          providerThread: harness.providerThread,
+          now: yield* DateTime.now,
+          attemptId: RunAttemptId.make("attempt-claude-refused-full-access"),
+          text: "Hello.",
+          attachments: [],
+        }),
+      );
+      assert.equal(harness.getOpenedOptions()?.permissionMode, "bypassPermissions");
+      yield* Queue.offer(
+        harness.sdkMessages,
+        claudeSdkFrame({ ...wakeTurnInit, permissionMode: "auto" }),
+      );
+
+      const terminal = yield* Queue.take(harness.terminalReceipts);
+      assert.equal(terminal.status, "failed");
+      if (terminal.status !== "failed") return;
+      assert.include(terminal.failure.message, `refused full access`);
+      assert.include(terminal.failure.message, `opened in "auto"`);
+      assert.equal(closes, 1);
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+      ),
+    ),
+  );
+
+  it.effect("keeps a delegated child in the mode Claude allows when it refuses full access", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeWakeHarness;
+      const turnInput = {
+        threadId: harness.threadId,
+        providerThread: harness.providerThread,
+        now: yield* DateTime.now,
+        attachments: [],
+        delegatedFrom: ThreadId.make("thread-claude-parent"),
+      };
+      yield* harness.runtime.startTurn(
+        makeClaudeTestTurnInput({
+          ...turnInput,
+          attemptId: RunAttemptId.make("attempt-claude-child-fallback-1"),
+          text: "Hello.",
+        }),
+      );
+      yield* harness.offerAndWait(claudeSdkFrame({ ...wakeTurnInit, permissionMode: "auto" }));
+      yield* Queue.offer(harness.sdkMessages, turnOneResult);
+      const first = yield* Queue.take(harness.terminalReceipts);
+      assert.equal(first.status, "completed");
+
+      yield* harness.runtime.startTurn(
+        makeClaudeTestTurnInput({
+          ...turnInput,
+          attemptId: RunAttemptId.make("attempt-claude-child-fallback-2"),
+          providerTurnOrdinal: 2,
+          text: "Continue.",
+        }),
+      );
+      assert.lengthOf(harness.offeredMessages, 2);
+      assert.deepEqual(harness.permissionModeChanges, []);
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+      ),
+    ),
   );
 
   it.effect("preserves typed Claude plans and todos through generic tool completion", () =>
