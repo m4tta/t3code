@@ -34,7 +34,7 @@ jobs:
         # Apple Silicon only for now. Add entries back to build other platforms.
         include:
           - label: macOS arm64
-            runner: macos-15
+            runner: macos-14
             platform: mac
             target: dmg
             arch: arm64
